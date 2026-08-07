@@ -1,5 +1,18 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.0 — 2026-08-07
+- True seamless loops: new "Seamless (generated loop)" mode — the
+  animation is generated to start AND end on the character's exact pose
+  (Wan 2.1 first-last-frame, ~18 GB, self-installs), so it loops playing
+  forward. No ping-pong moonwalking, no crossfade. Now the default loop
+  mode; ping-pong/crossfade remain as fast alternatives.
+- Double-click a history thumbnail to load that image straight into the
+  Animator's character slot.
+- Model governance: a permanent audit test verifies every model file the
+  app references is in the update manifest and resolves on HuggingFace —
+  Setup always installs the latest of everything, and the startup check
+  validates the full set (24 files, ~129 GB fully loaded).
+
 ## v1.6.0 — 2026-08-07
 - ANIMATOR: animate a character image into sprite frames and a GIF
   (Wan 2.2, Apache 2.0, ~18 GB, self-installs). Pick a character (any

@@ -18,6 +18,9 @@
   {"repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",             "remote_file": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "local": "wan2.2_ti2v_5B_fp16.safetensors",     "dir": "diffusion_models"},
   {"repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",             "remote_file": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "local": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "dir": "text_encoders"},
   {"repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",             "remote_file": "split_files/vae/wan2.2_vae.safetensors",             "local": "wan2.2_vae.safetensors",              "dir": "vae"},
+  {"repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",             "remote_file": "split_files/diffusion_models/wan2.1_flf2v_720p_14B_fp8_e4m3fn.safetensors", "local": "wan2.1_flf2v_720p_14B_fp8_e4m3fn.safetensors", "dir": "diffusion_models"},
+  {"repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",             "remote_file": "split_files/clip_vision/clip_vision_h.safetensors",  "local": "clip_vision_h.safetensors",           "dir": "clip_vision"},
+  {"repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",             "remote_file": "split_files/vae/wan_2.1_vae.safetensors",            "local": "wan_2.1_vae.safetensors",             "dir": "vae"},
   {"repo": "h94/IP-Adapter",                                   "remote_file": "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors", "local": "ip-adapter-plus_sdxl_vit-h.safetensors", "dir": "ipadapter"},
   {"repo": "h94/IP-Adapter",                                   "remote_file": "models/image_encoder/model.safetensors",             "local": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors", "dir": "clip_vision"}
 ]

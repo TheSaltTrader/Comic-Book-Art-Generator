@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -558,7 +558,58 @@ ANIM_KEEP = {
     "every 3rd (8 fps)": 3,
     "every 4th (6 fps)": 4,
 }
-ANIM_LOOPS = ["Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+ANIM_LOOPS = ["Seamless (generated loop — best)",
+              "Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+WAN_FLF_FILE = "wan2.1_flf2v_720p_14B_fp8_e4m3fn.safetensors"
+WAN_CLIPVIS_FILE = "clip_vision_h.safetensors"
+WAN21_VAE_FILE = "wan_2.1_vae.safetensors"
+
+
+def build_wan_flf_graph(p):
+    """Seamless loop via Wan 2.1 first-last-frame: the animation starts
+    AND ends on the character's exact pose, so it loops playing forward —
+    no ping-pong, no crossfade."""
+    g = {}
+    g["1"] = {"class_type": "UNETLoader",
+              "inputs": {"unet_name": WAN_FLF_FILE,
+                         "weight_dtype": "default"}}
+    g["2"] = {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": WAN_TE_FILE, "type": "wan",
+                         "device": "default"}}
+    g["3"] = {"class_type": "VAELoader",
+              "inputs": {"vae_name": WAN21_VAE_FILE}}
+    g["4"] = {"class_type": "CLIPTextEncode",
+              "inputs": {"text": p["prompt"], "clip": ["2", 0]}}
+    g["5"] = {"class_type": "CLIPTextEncode",
+              "inputs": {"text": p.get("negative", WAN_NEGATIVE),
+                         "clip": ["2", 0]}}
+    g["6"] = {"class_type": "LoadImage",
+              "inputs": {"image": p["anim_image_name"]}}
+    g["11"] = {"class_type": "CLIPVisionLoader",
+               "inputs": {"clip_name": WAN_CLIPVIS_FILE}}
+    g["12"] = {"class_type": "CLIPVisionEncode",
+               "inputs": {"clip_vision": ["11", 0], "image": ["6", 0],
+                          "crop": "none"}}
+    g["7"] = {"class_type": "WanFirstLastFrameToVideo",
+              "inputs": {"positive": ["4", 0], "negative": ["5", 0],
+                         "vae": ["3", 0], "width": p["width"],
+                         "height": p["height"], "length": p["length"],
+                         "batch_size": 1,
+                         "clip_vision_start_image": ["12", 0],
+                         "clip_vision_end_image": ["12", 0],
+                         "start_image": ["6", 0], "end_image": ["6", 0]}}
+    g["8"] = {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["7", 0],
+                         "negative": ["7", 1], "latent_image": ["7", 2],
+                         "seed": p["seed"], "steps": 20, "cfg": 5.0,
+                         "sampler_name": "uni_pc", "scheduler": "simple",
+                         "denoise": 1.0}}
+    g["9"] = {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["3", 0]}}
+    g["10"] = {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "cbac_anim",
+                          "images": ["9", 0]}}
+    return g
 
 
 def build_wan_graph(p):
@@ -2198,6 +2249,9 @@ class App:
                          command=lambda i=idx: self._select(i))
         btn.image = tk_th
         btn.pack(side="left", padx=2)
+        # double-click sends the image straight to the Animator
+        btn.bind("<Double-Button-1>",
+                 lambda _e, i=idx: self._thumb_to_animator(i))
         # keep the newest thumbnail in view
         self.gallery.update_idletasks()
         self.gallery_canvas.xview_moveto(1.0)
@@ -2385,9 +2439,13 @@ class App:
         "wan": [("diffusion_models", WAN_FILE),
                 ("text_encoders", WAN_TE_FILE),
                 ("vae", WAN_VAE_FILE)],
+        "wanflf": [("diffusion_models", WAN_FLF_FILE),
+                   ("text_encoders", WAN_TE_FILE),
+                   ("clip_vision", WAN_CLIPVIS_FILE),
+                   ("vae", WAN21_VAE_FILE)],
     }
     EDITOR_UNETS = {"kontext": KONTEXT_FILE, "qwen": QWEN_EDIT_FILE,
-                    "wan": WAN_FILE}
+                    "wan": WAN_FILE, "wanflf": WAN_FLF_FILE}
 
     def _editor_missing(self, engine):
         missing = [(d, f) for d, f in self.EDITOR_FILES[engine]
@@ -2525,6 +2583,18 @@ class App:
             self.anim_img_var.set(Path(path).name)
             self._schedule_persist()
 
+    def _thumb_to_animator(self, idx):
+        if idx >= len(self.session):
+            return
+        self.current = idx
+        self._show_current()
+        _img, _params, path = self.session[idx]
+        self.anim_image_path = str(path)
+        self.anim_img_var.set(Path(path).name)
+        self.status_var.set(f"{Path(path).name} loaded into the Animator — "
+                            "describe an action and hit 🎬.")
+        self._schedule_persist()
+
     def _use_current_for_anim(self):
         if self.current is None or not self.session:
             self.status_var.set("Select an image in the gallery first.")
@@ -2560,14 +2630,17 @@ class App:
                                           "slash', 'idle breathing, cape "
                                           "swaying'.")
             return
-        if not self._ensure_editor_ready("wan"):
+        seamless = self.anim_loop_var.get().startswith("Seamless")
+        if not self._ensure_editor_ready("wanflf" if seamless else "wan"):
             return
         w, h = ANIM_SIZES[self.anim_size_var.get()]
         secs = max(1, min(5, self.anim_secs_var.get()))
+        base_fps = 16 if seamless else 24   # Wan 2.1 FLF is a 16 fps model
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
         p = dict(image=self.anim_image_path, action=action, w=w, h=h,
-                 length=24 * secs + 1,
+                 length=base_fps * secs + 1, base_fps=base_fps,
+                 seamless=seamless,
                  keep_every=ANIM_KEEP.get(self.anim_keep_var.get(), 2),
                  loop=self.anim_loop_var.get(),
                  transparent=self.anim_transparent_var.get(),
@@ -2589,9 +2662,10 @@ class App:
                       "smoothly in place, full body visible, flat plain "
                       "solid background, locked camera, no camera "
                       "movement.")
-            graph = build_wan_graph(dict(
-                prompt=prompt, anim_image_name=name, width=p["w"],
-                height=p["h"], length=p["length"], seed=p["seed"]))
+            gp = dict(prompt=prompt, anim_image_name=name, width=p["w"],
+                      height=p["h"], length=p["length"], seed=p["seed"])
+            graph = build_wan_flf_graph(gp) if p.get("seamless") \
+                else build_wan_graph(gp)
             r = requests.post(f"{ENGINE_URL}/prompt",
                               json={"prompt": graph}, timeout=30)
             if r.status_code == 400:
@@ -2621,6 +2695,8 @@ class App:
                 raise RuntimeError("animation timed out")
             status(f"Fetching {len(metas)} frames…")
             frames = [gen._fetch_image(m) for m in metas]
+            if p.get("seamless") and len(frames) > 2:
+                frames = frames[:-1]   # last frame == first: drop the dupe
             kept = frames[::p["keep_every"]]
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2645,8 +2721,9 @@ class App:
                 for i, f in enumerate(kept):
                     f.save(frames_dir / f"frame_{i:03d}.png")
 
-            looped = apply_loop(kept, p["loop"])
-            fps_out = 24 / p["keep_every"]
+            looped = kept if p.get("seamless") \
+                else apply_loop(kept, p["loop"])
+            fps_out = p.get("base_fps", 24) / p["keep_every"]
             gif_path = out_dir / "animation.gif"
             save_gif(looped, gif_path, fps_out, p["transparent"])
             if p["zip"]:
