@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -666,19 +666,11 @@ class Generator:
 
     def _run(self, params):
         import websocket  # websocket-client
-        if params.get("ref_images") and \
-                params.get("ref_mode") in ("style", "character"):
+        if params.get("ref_images"):
+            # references override style/composition/characters (IP-Adapter)
             params["style_ref_names"] = [self._upload_ref(rp)
                                          for rp in params["ref_images"]]
-            params["ref_weight_type"] = "style transfer" \
-                if params["ref_mode"] == "style" else "standard"
-        elif params.get("ref_images"):
-            collage = make_collage(params["ref_images"], params["width"],
-                                   params["height"])
-            params["ref_image_name"] = self._upload_pil(
-                collage, "cbac_ref_collage.png")
-        elif params.get("ref_image"):
-            params["ref_image_name"] = self._upload_ref(params["ref_image"])
+            params["ref_weight_type"] = "standard"
         if params.get("border_cut"):
             w, h = params["width"], params["height"]
             # mask is slightly wider than the final cut so the art runs
@@ -1052,10 +1044,13 @@ class App:
         ttk.Button(seedrow, text="Reuse last", width=10,
                    command=self._reuse_seed).grid(row=0, column=3, padx=(10, 0))
 
-        # reference images (img2img — one or several)
-        ttk.Label(left, text="REFERENCE IMAGES (optional — the AI redraws "
-                             "them per your prompt; several = collage)",
-                  style="Head.TLabel").grid(row=r, sticky=W, pady=(8, 0)); r += 1
+        # reference images — the override: art style, composition and
+        # characters come from these
+        ttk.Label(left, text="REFERENCE IMAGES (optional — overrides preset "
+                             "& LoRAs: the AI takes art style, composition "
+                             "and characters from them)",
+                  style="Head.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W, pady=(8, 0)); r += 1
         rrow = ttk.Frame(left); rrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         rrow.columnconfigure(1, weight=1)
         ttk.Button(rrow, text="🖼 Load…", width=9,
@@ -1065,18 +1060,8 @@ class App:
                   wraplength=240).grid(row=0, column=1, sticky=W, padx=6)
         ttk.Button(rrow, text="✕", width=3,
                    command=self._clear_ref).grid(row=0, column=2)
-        self.ref_mode_var = StringVar(value="redraw")
-        for val, txt in (
-                ("redraw", "Redraw composition — keeps the image's layout "
-                           "(img2img, all models)"),
-                ("style", "Copy the style — new scene painted in the "
-                          "reference's look (SDXL models)"),
-                ("character", "Use the character — put the reference's "
-                              "subject in new scenes (SDXL models)")):
-            ttk.Radiobutton(left, text=txt, variable=self.ref_mode_var,
-                            value=val).grid(row=r, sticky=W); r += 1
         chrow = ttk.Frame(left); chrow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
-        ttk.Label(chrow, text="Change amount",
+        ttk.Label(chrow, text="Reference influence",
                   style="Dim.TLabel").pack(side="left")
         self.change_var = DoubleVar(value=60)
         ttk.Scale(chrow, from_=10, to=95, variable=self.change_var,
@@ -1246,7 +1231,6 @@ class App:
             "loras": self._selected_loras(),
             "lora_strength": round(self.lora_strength.get(), 2),
             "ref_images": self.ref_paths,
-            "ref_mode": self.ref_mode_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
             "border_theme": self._get(self.border_prompt_box),
@@ -1288,8 +1272,6 @@ class App:
                 first = Path(self.ref_paths[0]).name
                 self.ref_var.set(first if len(self.ref_paths) == 1 else
                                  f"{len(self.ref_paths)} images ({first}, …)")
-            if st.get("ref_mode") in ("redraw", "style", "character"):
-                self.ref_mode_var.set(st["ref_mode"])
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
             if self.border_ref_paths:
@@ -1329,7 +1311,7 @@ class App:
         for var in (self.model_var, self.preset_var, self.size_var,
                     self.steps_var, self.seed_var, self.batch_var,
                     self.transparent_var, self.random_seed_var,
-                    self.lora_strength, self.change_var, self.ref_mode_var,
+                    self.lora_strength, self.change_var,
                     self.border_auto_var, self.border_aspect_var,
                     self.border_thick_var, self.border_style_var,
                     self.border_model_var, self.border_count_var):
@@ -1418,6 +1400,12 @@ class App:
         self.ui_queue.put(("models_changed", None))
 
     # -------------------------------------------------- engine boot
+    def _restart_engine(self):
+        self.ui_queue.put(("status", "Restarting engine…"))
+        kill_engine()
+        time.sleep(2)
+        self._boot_engine()
+
     def _boot_engine(self):
         if not engine_alive():
             self.ui_queue.put(("status", "Starting local engine (first start "
@@ -1435,6 +1423,29 @@ class App:
                 self.ui_queue.put(("error", "Engine did not come up — see "
                                             "engine.log in the project folder."))
                 return
+        # a stale engine from an old session may have been started with
+        # wrong model paths: if it can't see models that exist on disk,
+        # restart it with our config (start_engine rewrites the yaml)
+        if not getattr(self, "_engine_heal_tried", False):
+            try:
+                disk = set(scan_models("checkpoints"))
+                known = set(_api_choices("CheckpointLoaderSimple",
+                                         "ckpt_name"))
+                if disk and disk - known:
+                    self._engine_heal_tried = True
+                    self.ui_queue.put(("status",
+                                       "Engine can't see the model folder "
+                                       "— restarting it with correct "
+                                       "paths…"))
+                    kill_engine()
+                    time.sleep(2)
+                    start_engine()
+                    for _ in range(180):
+                        if engine_alive():
+                            break
+                        time.sleep(2)
+            except Exception:
+                pass
         try:
             stats = api_get("/system_stats")
             vram = stats["devices"][0]["vram_total"] / (1024**3)
@@ -1592,15 +1603,34 @@ class App:
                                           "preset and hit 'Try example'.")
             return
         style = self._get(self.style_box)
-        full_prompt = f"{prompt}, {style}" if style else prompt
+        # a reference is a full override: the image supplies the art
+        # style, so the preset's style text (and LoRAs) are not applied
+        if self.ref_paths:
+            full_prompt = prompt
+        else:
+            full_prompt = f"{prompt}, {style}" if style else prompt
         model = self._model_raw()
         if not model:
             messagebox.showerror("Model", "No model selected — hit ↻ or wait "
                                           "for downloads to finish.")
             return
+        # the engine must actually know this model, or generation 400s —
+        # a stale engine (old model paths) is fixed by a restart
+        known = _api_choices("CheckpointLoaderSimple", "ckpt_name")
+        if known and model not in known and \
+                (MODELS / "checkpoints" / model).exists():
+            if messagebox.askyesno(
+                    "Engine restart needed",
+                    "The engine was started with old settings and can't "
+                    "see this model yet.\n\nRestart the engine now? "
+                    "(takes ~a minute, then hit Generate again)"):
+                threading.Thread(target=self._restart_engine,
+                                 daemon=True).start()
+            return
 
         strength = round(self.lora_strength.get(), 2)
-        loras = [(name, strength) for name in self._selected_loras()]
+        loras = [] if self.ref_paths else \
+            [(name, strength) for name in self._selected_loras()]
 
         w, h = SIZE_PRESETS[self.size_var.get()]
         try:
@@ -1620,30 +1650,28 @@ class App:
                       transparent=self.transparent_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
-                      ref_mode=self.ref_mode_var.get(),
                       style_weight=round(self.change_var.get() / 100, 2),
                       denoise=round(self.change_var.get() / 100, 2))
-        if self.ref_paths and self.ref_mode_var.get() in ("style",
-                                                          "character"):
+        if self.ref_paths:
             if model_family(model) in ("flux", "schnell"):
                 messagebox.showinfo(
-                    "Reference mode",
-                    "'Copy the style' and 'Use the character' use "
-                    "IP-Adapter, which works with SDXL-family models "
-                    "(Juggernaut, DreamShaper, Animagine).\nPick one of "
-                    "those — or switch to 'Redraw composition' for Flux.")
+                    "Reference images",
+                    "Reference images use IP-Adapter, which works with "
+                    "SDXL-family models (Juggernaut, DreamShaper, "
+                    "Animagine). Pick one of those.")
                 return
             if not self._style_support_ok():
                 if messagebox.askyesno(
-                        "Install style add-on",
-                        "Style/character references need the IP-Adapter "
-                        "add-on (a node plus ~3.2 GB of models), which "
-                        "isn't installed yet.\n\nInstall it now? The "
-                        "engine restarts when done — then hit Generate "
-                        "again."):
+                        "Install reference add-on",
+                        "Reference images need the IP-Adapter add-on (a "
+                        "node plus ~3.2 GB of models), which isn't "
+                        "installed yet.\n\nInstall it now? The engine "
+                        "restarts when done — then hit Generate again."):
                     threading.Thread(target=self._install_style_support,
                                      daemon=True).start()
                 return
+            self.status_var.set("Reference override active — preset style "
+                                "and LoRAs are ignored for this run.")
 
         self.settings["last_model"] = model
         self._persist()

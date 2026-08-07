@@ -1,5 +1,18 @@
 # Changelog — Comic Book Art Creator
 
+## v1.3.2 — 2026-08-07
+- Reference images simplified to a single override behavior (the three
+  modes are gone): loading references makes them the source of art style,
+  composition and characters — the prompt picks what to use from them,
+  and the art-style preset + LoRA selections are automatically ignored
+  while references are active. "Change amount" is now "Reference
+  influence".
+- Fixes "Prompt outputs failed validation (CheckpointLoaderSimple)": a
+  stale engine left over from an old version could be running with wrong
+  model paths. The app now detects an engine that can't see the model
+  folder and restarts it with correct settings — automatically at
+  startup, and with a prompt at generate time.
+
 ## v1.3.1 — 2026-08-07
 - Fixes "HTTPError 400 … /prompt" for users who updated from older
   versions: the update popup could deliver the IP-Adapter models but not

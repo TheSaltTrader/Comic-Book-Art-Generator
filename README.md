@@ -90,17 +90,17 @@ page URL (free API key from civitai.com → Account Settings → API Keys;
 stored encrypted). Or drop `.safetensors` files into `models\loras` and
 hit **↻**.
 
-## Reference images — three modes
+## Reference images — the override
 
-Load one or more reference images and pick how the AI uses them:
-
-- **Redraw composition** (all models): classic img2img — keeps the
-  reference's layout; "Change amount" sets how far it strays.
-- **Copy the style** (SDXL models): paints whatever your prompt describes
-  in the reference's art style — new composition, borrowed look.
-- **Use the character** (SDXL models): learns the reference's subject and
-  puts them in any scene your prompt describes — redraw them, repose
-  them, relocate them.
+Load one or more reference images and they become the example the AI
+follows: **art style, composition and characters all come from the
+references**, and your prompt picks what to use from them — redraw a
+character, put them in a new scene, or borrow just the look for new art.
+While references are loaded, the art-style preset and LoRA selections
+are ignored (the image *is* the style). "Reference influence" sets how
+strongly the references steer the result. Works with SDXL-family models
+(Juggernaut, DreamShaper, Animagine); the IP-Adapter add-on installs
+itself on first use if missing.
 
 ## Transparency
 
