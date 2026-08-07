@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -471,9 +471,17 @@ def build_kontext_graph(p):
                "inputs": {"conditioning": ["32", 0], "guidance": 2.5}}
     g["34"] = {"class_type": "ConditioningZeroOut",
                "inputs": {"conditioning": ["4", 0]}}
+    # by default the output canvas follows the reference; with out_size
+    # the reference only conditions and a fresh canvas sets the size
+    latent_ref = ["31", 0]
+    if p.get("out_size"):
+        ow, oh = p["out_size"]
+        g["35"] = {"class_type": "EmptySD3LatentImage",
+                   "inputs": {"width": ow, "height": oh, "batch_size": 1}}
+        latent_ref = ["35", 0]
     g["6"] = {"class_type": "KSampler",
               "inputs": {"model": ["1", 0], "positive": ["33", 0],
-                         "negative": ["34", 0], "latent_image": ["31", 0],
+                         "negative": ["34", 0], "latent_image": latent_ref,
                          "seed": p["seed"], "steps": p.get("steps") or 20,
                          "cfg": 1.0, "sampler_name": "euler",
                          "scheduler": "simple", "denoise": 1.0}}
@@ -514,9 +522,15 @@ def build_qwen_edit_graph(p):
                           "resolution_steps": 1}}
     g["31"] = {"class_type": "VAEEncode",
                "inputs": {"pixels": ["30", 0], "vae": ["3", 0]}}
+    latent_ref = ["31", 0]
+    if p.get("out_size"):
+        ow, oh = p["out_size"]
+        g["35"] = {"class_type": "EmptySD3LatentImage",
+                   "inputs": {"width": ow, "height": oh, "batch_size": 1}}
+        latent_ref = ["35", 0]
     g["6"] = {"class_type": "KSampler",
               "inputs": {"model": ["1", 0], "positive": ["20", 0],
-                         "negative": ["21", 0], "latent_image": ["31", 0],
+                         "negative": ["21", 0], "latent_image": latent_ref,
                          "seed": p["seed"], "steps": p.get("steps") or 20,
                          "cfg": 2.5, "sampler_name": "euler",
                          "scheduler": "simple", "denoise": 1.0}}
@@ -1194,6 +1208,12 @@ class App:
                      values=list(EDITOR_ENGINES)).grid(row=0, column=1,
                                                        padx=(4, 0),
                                                        sticky="ew")
+        self.editor_canvas_var = BooleanVar(value=False)
+        ttk.Checkbutton(left, text="Output at canvas size (re-stage into "
+                                   "the size selected below instead of "
+                                   "keeping the image's size)",
+                        variable=self.editor_canvas_var).grid(
+            row=r, sticky=W); r += 1
         self.change_var = DoubleVar(value=60)   # border-ref influence
 
         # generate
@@ -1341,6 +1361,7 @@ class App:
             "lora_strength": round(self.lora_strength.get(), 2),
             "ref_images": self.ref_paths,
             "editor": self.editor_var.get(),
+            "editor_canvas": self.editor_canvas_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
             "border_theme": self._get(self.border_prompt_box),
@@ -1380,6 +1401,7 @@ class App:
                                  f"{len(self.ref_paths)} images ({first}, …)")
             if st.get("editor") in EDITOR_ENGINES:
                 self.editor_var.set(st["editor"])
+            self.editor_canvas_var.set(st.get("editor_canvas", False))
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
             if self.border_ref_paths:
@@ -1415,6 +1437,7 @@ class App:
                     self.steps_var, self.seed_var, self.batch_var,
                     self.transparent_var, self.random_seed_var,
                     self.lora_strength, self.change_var, self.editor_var,
+                    self.editor_canvas_var,
                     self.border_auto_var, self.border_aspect_var,
                     self.border_thick_var):
             var.trace_add("write", self._schedule_persist)
@@ -1816,6 +1839,8 @@ class App:
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
                       editor=editor,
+                      out_size=(w, h) if editing
+                      and self.editor_canvas_var.get() else None,
                       denoise=round(self.change_var.get() / 100, 2))
         if editing:
             self.status_var.set("Editing with "
@@ -2137,7 +2162,8 @@ class App:
             transparent=False, preset="border maker",
             border_cut=int(self.border_thick_var.get()),
             ref_images=refs, editor=editor,
-            ref_collage_size=(w, h) if refs else None)
+            ref_collage_size=(w, h) if refs else None,
+            out_size=(w, h) if refs else None)
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0

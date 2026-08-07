@@ -1,5 +1,14 @@
 # Changelog — Comic Book Art Creator
 
+## v1.5.2 — 2026-08-07
+- New "Output at canvas size" checkbox in the Image editor: the loaded
+  image is used purely as reference while the output is generated at the
+  canvas size selected in the settings — e.g. a portrait character can
+  be re-staged into a widescreen scene. Off by default so in-place edits
+  (like text removal) stay pixel-faithful to the original size.
+- Borders from references now always output at the exact selected
+  aspect/dimensions (no more resolution snapping).
+
 ## v1.5.1 — 2026-08-07
 - Border maker simplified: the Style selector and the section's own
   Model/Variations controls are removed — borders now mimic the main
