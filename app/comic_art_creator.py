@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -776,6 +776,35 @@ class App:
         root.after(100, self._poll_queue)
         threading.Thread(target=self._boot_engine, daemon=True).start()
         threading.Thread(target=self._check_updates_bg, daemon=True).start()
+        root.after(600, self._first_run_check)
+
+    def _first_run_check(self):
+        """On a machine where Setup hasn't run (or ran engine-only),
+        say so plainly and offer to launch Setup.exe."""
+        runtime_missing = not (PROJECT / "python" / "python.exe").exists() \
+            and not (PROJECT / "venv" / "Scripts" / "python.exe").exists()
+        models_missing = not scan_models("checkpoints")
+        if not (runtime_missing or models_missing):
+            return
+        setup_exe = PROJECT / "Setup.exe"
+        what = []
+        if runtime_missing:
+            what.append("the AI engine")
+        if models_missing:
+            what.append("the models")
+        msg = (f"This installation is missing {' and '.join(what)} — "
+               "that's why lists are empty.\n\n")
+        if setup_exe.exists():
+            msg += ("Run Setup now? It downloads everything needed "
+                    "(~36 GB) and this app will find it automatically "
+                    "afterwards (hit ↻ or restart).")
+            if messagebox.askyesno("Setup required", msg):
+                subprocess.Popen([str(setup_exe)])
+        else:
+            messagebox.showinfo(
+                "Setup required",
+                msg + "Setup.exe was not found next to this app — unzip "
+                      "the full release and run Setup.exe first.")
 
     # -------------------------------------------------- ui scaffolding
     def _style(self):
@@ -1401,6 +1430,10 @@ class App:
             self._model_display[disp] = name
         self.model_dd["values"] = list(self._model_display)
         self.border_model_dd["values"] = list(self._model_display)
+        if not ckpts:
+            self.status_var.set(
+                "No models installed — run Setup.exe (or drop .safetensors "
+                "into models\\checkpoints), then hit ↻.")
 
         cur = self._model_raw()
         if cur not in ckpts:

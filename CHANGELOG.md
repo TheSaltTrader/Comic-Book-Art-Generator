@@ -1,5 +1,11 @@
 # Changelog — Comic Book Art Creator
 
+## v1.2.3 — 2026-08-07
+- First-run experience fix (blank model list on fresh PCs): the app now
+  detects a missing engine or empty model folder, explains it plainly,
+  and offers to launch Setup.exe directly. The status bar also says what
+  to do when no models are found.
+
 ## v1.2.2 — 2026-08-07
 - Portability fix for public release: the model-paths config is now
   written by the app with the machine's own absolute path at every engine
