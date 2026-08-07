@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.3.3 — 2026-08-07
+- GPU compatibility check: the app detects your NVIDIA card's VRAM at
+  startup. Models that fit show green in the model dropdowns; models
+  beyond the card's memory are greyed out, labeled "exceeds GPU memory",
+  and can't be selected or generated with (a clear warning explains why).
+  Machines without an NVIDIA GPU get an explicit incompatibility notice.
+
 ## v1.3.2 — 2026-08-07
 - Reference images simplified to a single override behavior (the three
   modes are gone): loading references makes them the source of art style,

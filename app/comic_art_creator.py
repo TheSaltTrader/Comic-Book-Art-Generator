@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -156,6 +156,24 @@ def dpapi_decrypt(b64):
 # --------------------------------------------------------------------------
 # engine management + API
 # --------------------------------------------------------------------------
+
+VRAM_HEADROOM_GB = 2.0   # a model needs its size + this much working room
+
+
+def gpu_vram_gb():
+    """Total VRAM of the NVIDIA GPU in GB, or None if no NVIDIA GPU /
+    driver is present. Works before the engine is up."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total",
+                            "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=15,
+                           creationflags=NO_WINDOW)
+        if r.returncode == 0 and r.stdout.strip():
+            return int(r.stdout.strip().splitlines()[0]) / 1024
+    except Exception:
+        pass
+    return None
+
 
 def engine_alive(timeout=2):
     try:
@@ -815,6 +833,10 @@ class App:
         self._persist_job = None
         self.ref_paths = []        # img2img reference images
         self.border_ref_paths = []  # border-maker reference images
+        self.vram_gb = gpu_vram_gb()   # None = no NVIDIA GPU detected
+        self._model_fits = {}      # raw name -> fits in VRAM
+        self._last_fit_display = ""
+        self._last_fit_border = ""
 
         self._build_ui()
         self._apply_ui_state(self.settings.get("ui", {}))
@@ -880,6 +902,12 @@ class App:
         s.configure("TRadiobutton", background=BG, foreground=FG)
         s.map("TRadiobutton", background=[("active", BG)])
         s.configure("TCombobox", padding=4)
+        s.configure("Fit.TCombobox", padding=4, foreground=ACCENT2)
+        s.map("Fit.TCombobox", fieldbackground=[("readonly", BG3)],
+              foreground=[("readonly", ACCENT2)])
+        s.configure("NoFit.TCombobox", padding=4, foreground="#77778a")
+        s.map("NoFit.TCombobox", fieldbackground=[("readonly", BG3)],
+              foreground=[("readonly", "#77778a")])
         s.configure("Horizontal.TProgressbar", background=ACCENT2,
                     troughcolor=BG2)
         s.configure("TSpinbox", padding=4)
@@ -944,7 +972,7 @@ class App:
                                      state="readonly", exportselection=False)
         self.model_dd.grid(row=0, column=0, sticky="ew")
         self.model_dd.bind("<<ComboboxSelected>>",
-                           lambda _e: self._refresh_preset_list())
+                           lambda _e: self._on_model_pick())
         ttk.Button(mrow, text="↻", width=3,
                    command=self._refresh_models).grid(row=0, column=1, padx=(6, 0))
         self.vram_note = StringVar(
@@ -1114,6 +1142,8 @@ class App:
                                             textvariable=self.border_model_var,
                                             state="readonly", exportselection=False)
         self.border_model_dd.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        self.border_model_dd.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._on_border_model_pick())
         barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(barow, text="Aspect", style="Dim.TLabel").grid(row=0,
                                                                  column=0)
@@ -1483,6 +1513,35 @@ class App:
                                  if p.get("model_hint", "sdxl") == want]
         self.preset_dd["values"] = names
 
+    def _vram_block_msg(self, raw):
+        gb = self._size_gb(raw)
+        messagebox.showwarning(
+            "Not enough GPU memory",
+            f"{raw} is {gb:.1f} GB and needs about "
+            f"{gb + VRAM_HEADROOM_GB:.0f} GB of VRAM — your card has "
+            f"{self.vram_gb:.1f} GB. Pick a green model instead.")
+
+    def _on_model_pick(self):
+        raw = self._model_raw()
+        if not self._model_fits.get(raw, True):
+            self._vram_block_msg(raw)
+            if self._last_fit_display:
+                self.model_var.set(self._last_fit_display)
+        else:
+            self._last_fit_display = self.model_var.get()
+        self._update_model_entry_style()
+        self._refresh_preset_list()
+
+    def _on_border_model_pick(self):
+        raw = self._model_display.get(self.border_model_var.get(),
+                                      self.border_model_var.get())
+        if not self._model_fits.get(raw, True):
+            self._vram_block_msg(raw)
+            if self._last_fit_border:
+                self.border_model_var.set(self._last_fit_border)
+        else:
+            self._last_fit_border = self.border_model_var.get()
+
     def _use_example(self):
         p = self._preset()
         if not p:
@@ -1504,28 +1563,74 @@ class App:
         except OSError:
             return 0
 
+    def _model_fits_vram(self, gb):
+        if self.vram_gb is None or not gb:
+            return True   # unknown GPU or unknown size: don't block
+        return gb + VRAM_HEADROOM_GB <= self.vram_gb
+
+    def _color_model_dropdown(self, dd):
+        """Green = fits this GPU, grey = exceeds its memory (Tk popdown)."""
+        try:
+            pd = self.root.tk.call("ttk::combobox::PopdownWindow", dd)
+            lb = f"{pd}.f.l"
+            for i, disp in enumerate(dd["values"]):
+                raw = self._model_display.get(disp, disp)
+                fits = self._model_fits.get(raw, True)
+                self.root.tk.call(lb, "itemconfigure", i, "-foreground",
+                                  ACCENT2 if fits else "#5a5a6a")
+        except Exception:
+            pass
+
+    def _update_model_entry_style(self):
+        fits = self._model_fits.get(self._model_raw(), True)
+        self.model_dd.configure(style="Fit.TCombobox" if fits
+                                else "NoFit.TCombobox")
+
     def _refresh_models(self):
         ckpts = list_checkpoints()
         self._model_display = {}
+        self._model_fits = {}
         for name in ckpts:
             gb = self._size_gb(name)
+            fits = self._model_fits_vram(gb)
+            self._model_fits[name] = fits
             disp = f"{name}  ·  {gb:.1f} GB" if gb else name
+            if not fits:
+                disp += "  — exceeds GPU memory"
             self._model_display[disp] = name
         self.model_dd["values"] = list(self._model_display)
         self.border_model_dd["values"] = list(self._model_display)
+        for dd in (self.model_dd, self.border_model_dd):
+            dd.configure(postcommand=lambda d=dd:
+                         self._color_model_dropdown(d))
         if not ckpts:
             self.status_var.set(
                 "No models installed — run Setup.exe (or drop .safetensors "
                 "into models\\checkpoints), then hit ↻.")
+        if self.vram_gb is None:
+            self.vram_note.set(
+                "⚠ No NVIDIA GPU detected — this app requires an NVIDIA "
+                "card with a current driver; generation will not work.")
+        else:
+            n_fit = sum(1 for f in self._model_fits.values() if f)
+            self.vram_note.set(
+                f"Your GPU: {self.vram_gb:.1f} GB VRAM — green models fit, "
+                f"greyed models exceed it ({n_fit}/{len(ckpts)} usable).")
 
         cur = self._model_raw()
         if cur not in ckpts:
             last = self.settings.get("last_model")
-            cur = last if last in ckpts else (ckpts[0] if ckpts else "")
+            cur = last if last in ckpts else ""
+            if not cur or not self._model_fits.get(cur, True):
+                cur = next((c for c in ckpts if self._model_fits.get(c)),
+                           ckpts[0] if ckpts else "")
         for disp, raw in self._model_display.items():
             if raw == cur:
                 self.model_var.set(disp)
+                if self._model_fits.get(raw, True):
+                    self._last_fit_display = disp
                 break
+        self._update_model_entry_style()
         # border model is fully independent: only default it when empty or
         # its file is gone — never because the main model changed
         bcur = self._model_display.get(self.border_model_var.get(),
@@ -1613,6 +1718,9 @@ class App:
         if not model:
             messagebox.showerror("Model", "No model selected — hit ↻ or wait "
                                           "for downloads to finish.")
+            return
+        if not self._model_fits.get(model, True):
+            self._vram_block_msg(model)
             return
         # the engine must actually know this model, or generation 400s —
         # a stale engine (old model paths) is fixed by a restart
@@ -1726,9 +1834,8 @@ class App:
                     self.status_var.set("Engine ready.")
                     self._refresh_models()
                 elif kind == "vram":
-                    self.vram_note.set(
-                        f"Your GPU: {msg[1]:.1f} GB VRAM — each model's size "
-                        f"must stay under this (keep ~2 GB headroom).")
+                    self.vram_gb = msg[1]
+                    self._refresh_models()   # recolor with engine's number
                 elif kind == "models_changed":
                     self._refresh_models()
                 elif kind == "updates":
@@ -1927,6 +2034,9 @@ class App:
         model = self._model_display.get(self.border_model_var.get(),
                                         self.border_model_var.get()) \
             or self._model_raw()
+        if not self._model_fits.get(model, True):
+            self._vram_block_msg(model)
+            return
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
         strength = round(self.lora_strength.get(), 2)
