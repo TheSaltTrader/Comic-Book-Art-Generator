@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.4.1 — 2026-08-07
+- Setup now recalculates its numbers live from the model manifest: full
+  model-pack size, how many GB are still to download on this machine, and
+  the estimated total disk use when installation completes.
+- Running the app before Setup now states plainly that it cannot create
+  art until Setup completes the installation.
+
 ## v1.4.0 — 2026-08-07
 - The reference feature is replaced by a true **image editor**
   (Gemini-style): load image(s) and the prompt is the instruction —

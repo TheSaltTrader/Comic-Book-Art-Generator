@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -972,11 +972,12 @@ class App:
         if models_missing:
             what.append("the models")
         msg = (f"This installation is missing {' and '.join(what)} — "
-               "that's why lists are empty.\n\n")
+               "the app cannot create art until Setup completes the "
+               "installation.\n\n")
         if setup_exe.exists():
-            msg += ("Run Setup now? It downloads everything needed "
-                    "(~36 GB) and this app will find it automatically "
-                    "afterwards (hit ↻ or restart).")
+            msg += ("Run Setup now? It downloads everything needed and "
+                    "this app will find it automatically afterwards "
+                    "(hit ↻ or restart).")
             if messagebox.askyesno("Setup required", msg):
                 subprocess.Popen([str(setup_exe)])
         else:

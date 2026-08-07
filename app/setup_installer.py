@@ -294,19 +294,18 @@ class SetupApp:
         frm.columnconfigure(0, weight=1)
         frm.rowconfigure(2, weight=1)
 
-        ttk.Label(frm, text="Fully self-contained install - no Python, git "
-                            "or anything else required on this PC,\nand "
-                            "nothing is written outside this folder. "
-                            "Downloads the AI engine, a private\nPython "
-                            "runtime, and the starter models (~36 GB "
-                            "download, ~60 GB disk).\nNeeds 64-bit Windows "
-                            "10/11 and an NVIDIA GPU.",
+        self.intro_var = StringVar(
+            value="Fully self-contained install - no Python, git or "
+                  "anything else required on this PC,\nand nothing is "
+                  "written outside this folder. Calculating download "
+                  "sizes…\nNeeds 64-bit Windows 10/11 and an NVIDIA GPU.")
+        ttk.Label(frm, textvariable=self.intro_var,
                   justify="left").grid(row=0, sticky="w")
 
         row = ttk.Frame(frm)
         row.grid(row=1, sticky="ew", pady=10)
         self.skip_models = BooleanVar(value=False)
-        ttk.Checkbutton(row, text="Engine only (skip the 36 GB model pack)",
+        ttk.Checkbutton(row, text="Engine only (skip the model pack)",
                         variable=self.skip_models).pack(side="left")
         self.go_btn = ttk.Button(row, text="Install", command=self.start)
         self.go_btn.pack(side="right")
@@ -332,7 +331,32 @@ class SetupApp:
 
     def _startup_check(self):
         engine_ok = engine_installed()
-        needed = models_needed() if engine_ok else None
+        needed = models_needed()
+        # recalculate real totals from the manifest + what's on disk
+        try:
+            entries = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            installed_gb = sum(
+                (PROJECT / "models" / e["dir"] / e["local"]).stat().st_size
+                for e in entries
+                if (PROJECT / "models" / e["dir"] / e["local"]).exists()
+            ) / (1 << 30)
+            dl_gb = sum(e.get("size") or 0 for e in needed) / (1 << 30)
+            total_gb = installed_gb + dl_gb
+            runtime_gb = 0 if engine_ok else 9
+            self.root.after(0, lambda: self.intro_var.set(
+                "Fully self-contained install - no Python, git or anything "
+                "else required on this PC,\nand nothing is written outside "
+                f"this folder. Model pack: {total_gb:.0f} GB total, "
+                f"{dl_gb:.0f} GB still to download"
+                + (f" (+ ~{runtime_gb} GB engine & runtime)"
+                   if runtime_gb else "")
+                + f".\nEstimated disk use when complete: "
+                f"~{total_gb + 9:.0f} GB. Needs 64-bit Windows 10/11 and "
+                "an NVIDIA GPU."))
+        except Exception:
+            pass
+        if not engine_ok:
+            needed = None
 
         def _apply():
             if self.running:
