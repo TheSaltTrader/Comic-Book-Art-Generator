@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -293,6 +293,8 @@ def download_model_update(entry, status_cb):
 # --------------------------------------------------------------------------
 
 ENGINE_VERSION_FILE = PROJECT / "engine_version.json"
+IPA_NODE_ZIP = ("https://github.com/cubiq/ComfyUI_IPAdapter_plus/"
+                "archive/refs/heads/main.zip")
 COMFY_COMMITS_API = ("https://api.github.com/repos/comfyanonymous/"
                      "ComfyUI/commits/master")
 COMFY_ZIP_URL = ("https://github.com/comfyanonymous/ComfyUI/"
@@ -713,6 +715,23 @@ class Generator:
                                   json={"prompt": graph,
                                         "client_id": self.client_id},
                                   timeout=30)
+                if r.status_code == 400:
+                    try:
+                        j = r.json()
+                        msg = j.get("error", {}).get("message",
+                                                     "invalid workflow")
+                        bad = ", ".join(sorted(
+                            v.get("class_type", k)
+                            for k, v in (j.get("node_errors") or {}).items()))
+                        if bad:
+                            msg += f" (nodes: {bad})"
+                    except Exception:
+                        msg = "engine rejected the workflow"
+                    raise RuntimeError(
+                        f"Engine rejected the request: {msg}. If this "
+                        "mentions IPAdapter, use the style/character mode "
+                        "once more — the app will offer to install the "
+                        "missing add-on.")
                 r.raise_for_status()
                 prompt_id = r.json()["prompt_id"]
                 images = self._await_images(ws, prompt_id)
@@ -1605,15 +1624,26 @@ class App:
                       style_weight=round(self.change_var.get() / 100, 2),
                       denoise=round(self.change_var.get() / 100, 2))
         if self.ref_paths and self.ref_mode_var.get() in ("style",
-                                                          "character") \
-                and model_family(model) in ("flux", "schnell"):
-            messagebox.showinfo(
-                "Reference mode",
-                "'Copy the style' and 'Use the character' use IP-Adapter, "
-                "which works with SDXL-family models (Juggernaut, "
-                "DreamShaper, Animagine).\nPick one of those — or switch "
-                "to 'Redraw composition' for Flux.")
-            return
+                                                          "character"):
+            if model_family(model) in ("flux", "schnell"):
+                messagebox.showinfo(
+                    "Reference mode",
+                    "'Copy the style' and 'Use the character' use "
+                    "IP-Adapter, which works with SDXL-family models "
+                    "(Juggernaut, DreamShaper, Animagine).\nPick one of "
+                    "those — or switch to 'Redraw composition' for Flux.")
+                return
+            if not self._style_support_ok():
+                if messagebox.askyesno(
+                        "Install style add-on",
+                        "Style/character references need the IP-Adapter "
+                        "add-on (a node plus ~3.2 GB of models), which "
+                        "isn't installed yet.\n\nInstall it now? The "
+                        "engine restarts when done — then hit Generate "
+                        "again."):
+                    threading.Thread(target=self._install_style_support,
+                                     daemon=True).start()
+                return
 
         self.settings["last_model"] = model
         self._persist()
@@ -1891,6 +1921,64 @@ class App:
         threading.Thread(target=gen.run, args=(params,),
                          daemon=True).start()
         self.status_var.set("Generating border…")
+
+    # -------------------------------------------------- style add-on
+    def _style_support_ok(self):
+        """IP-Adapter node loaded in the engine AND its models on disk."""
+        try:
+            api_get("/object_info/IPAdapterUnifiedLoader")
+            node_ok = True
+        except Exception:
+            node_ok = False
+        return node_ok and bool(scan_models("ipadapter")) \
+            and bool(scan_models("clip_vision"))
+
+    def _install_style_support(self):
+        """Self-install the IP-Adapter node + models, then restart the
+        engine — for installs that predate v1.3.0."""
+        try:
+            node_dir = ENGINE_DIR / "custom_nodes" / "ComfyUI_IPAdapter_plus"
+            if not node_dir.exists():
+                self.ui_queue.put(("status", "Installing IP-Adapter node…"))
+                tmpd = PROJECT / "_upd_tmp"
+                shutil.rmtree(tmpd, ignore_errors=True)
+                tmpd.mkdir(parents=True)
+                z = tmpd / "ipa.zip"
+                with requests.get(IPA_NODE_ZIP, stream=True,
+                                  timeout=60) as r:
+                    r.raise_for_status()
+                    with open(z, "wb") as fh:
+                        for c in r.iter_content(1 << 20):
+                            fh.write(c)
+                with zipfile.ZipFile(z) as zf:
+                    zf.extractall(tmpd)
+                inner = next(tmpd.glob("ComfyUI_IPAdapter_plus-*"))
+                node_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(inner), str(node_dir))
+                shutil.rmtree(tmpd, ignore_errors=True)
+            try:
+                entries = json.loads(
+                    MANIFEST_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                entries = []
+            for e in entries:
+                if e["dir"] in ("ipadapter", "clip_vision") and \
+                        not (MODELS / e["dir"] / e["local"]).exists():
+                    self.ui_queue.put(("status",
+                                       f"Downloading {e['local']}…"))
+                    download_model_update(
+                        dict(e, size=0),
+                        lambda s: self.ui_queue.put(("status", s)))
+            self.ui_queue.put(("status",
+                               "Restarting engine with IP-Adapter…"))
+            kill_engine()
+            time.sleep(2)
+            threading.Thread(target=self._boot_engine, daemon=True).start()
+            self.ui_queue.put(("status", "IP-Adapter installed — wait for "
+                                         "'Engine ready.', then Generate "
+                                         "again."))
+        except Exception as e:
+            self.ui_queue.put(("error", f"IP-Adapter install failed: {e}"))
 
     # -------------------------------------------------- training dataset
     def _add_to_training(self):

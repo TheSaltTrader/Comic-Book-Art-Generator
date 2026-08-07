@@ -1,5 +1,14 @@
 # Changelog — Comic Book Art Creator
 
+## v1.3.1 — 2026-08-07
+- Fixes "HTTPError 400 … /prompt" for users who updated from older
+  versions: the update popup could deliver the IP-Adapter models but not
+  the engine node. The app now detects the missing add-on when a
+  style/character reference is used and installs it itself (node +
+  models + engine restart) after a yes/no prompt.
+- Engine 400 responses now surface the real reason (invalid nodes,
+  missing models) instead of a bare HTTP error.
+
 ## v1.3.0 — 2026-08-07
 - Reference images now have three modes (fixes "the model just repeats
   the image"): **Redraw composition** (img2img, keeps layout — all
