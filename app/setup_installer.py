@@ -200,7 +200,8 @@ def _run_install(skip_models, log, status, progress):
     # ---- 4: folders + models ----
     for d in ("models/checkpoints", "models/loras", "models/vae",
               "models/upscale_models", "models/rembg", "models/ipadapter",
-              "models/clip_vision", "output/_raw"):
+              "models/clip_vision", "models/diffusion_models",
+              "models/text_encoders", "output/_raw"):
         (PROJECT / d).mkdir(parents=True, exist_ok=True)
     if skip_models:
         log("Model pack skipped (engine-only install).")

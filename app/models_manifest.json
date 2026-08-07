@@ -11,6 +11,10 @@
   {"repo": "alvdansen/BandW-Manga",                            "remote_file": "BW-000014.safetensors",                              "local": "SDXL_BW_Manga.safetensors",           "dir": "loras"},
   {"repo": "artificialguybr/LineAniRedmond-LinearMangaSDXL-V2","remote_file": "LineAniRedmondV2-Lineart-LineAniAF.safetensors",     "local": "SDXL_LineArt_Manga.safetensors",      "dir": "loras"},
   {"repo": "Linaqruf/style-enhancer-xl-lora",                  "remote_file": "style-enhancer-xl.safetensors",                      "local": "SDXL_StyleEnhancer_Anime.safetensors", "dir": "loras"},
+  {"repo": "Comfy-Org/flux1-kontext-dev_ComfyUI",              "remote_file": "split_files/diffusion_models/flux1-dev-kontext_fp8_scaled.safetensors", "local": "flux1-dev-kontext_fp8_scaled.safetensors", "dir": "diffusion_models"},
+  {"repo": "Comfy-Org/Qwen-Image-Edit_ComfyUI",                "remote_file": "split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "local": "qwen_image_edit_2511_fp8mixed.safetensors", "dir": "diffusion_models"},
+  {"repo": "Comfy-Org/Qwen-Image_ComfyUI",                     "remote_file": "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "local": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "dir": "text_encoders"},
+  {"repo": "Comfy-Org/Qwen-Image_ComfyUI",                     "remote_file": "split_files/vae/qwen_image_vae.safetensors",         "local": "qwen_image_vae.safetensors",          "dir": "vae"},
   {"repo": "h94/IP-Adapter",                                   "remote_file": "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors", "local": "ip-adapter-plus_sdxl_vit-h.safetensors", "dir": "ipadapter"},
   {"repo": "h94/IP-Adapter",                                   "remote_file": "models/image_encoder/model.safetensors",             "local": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors", "dir": "clip_vision"}
 ]

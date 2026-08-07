@@ -90,17 +90,23 @@ page URL (free API key from civitai.com → Account Settings → API Keys;
 stored encrypted). Or drop `.safetensors` files into `models\loras` and
 hit **↻**.
 
-## Reference images — the override
+## Image editor — Gemini-style instruction editing
 
-Load one or more reference images and they become the example the AI
-follows: **art style, composition and characters all come from the
-references**, and your prompt picks what to use from them — redraw a
-character, put them in a new scene, or borrow just the look for new art.
-While references are loaded, the art-style preset and LoRA selections
-are ignored (the image *is* the style). "Reference influence" sets how
-strongly the references steer the result. Works with SDXL-family models
-(Juggernaut, DreamShaper, Animagine); the IP-Adapter add-on installs
-itself on first use if missing.
+Load one or more images and **your prompt becomes an edit instruction**:
+"remove the title text", "make it night", "put her on a beach", "give
+him more detailed armor", "combine these two characters into one scene".
+The editor changes what you asked and keeps the rest of the image intact.
+While images are loaded, the model/preset/LoRA selections are ignored —
+the editor engines are separate models:
+
+- **Flux Kontext** — best overall edit quality and instruction following
+  (non-commercial license; needs ~16 GB VRAM)
+- **Qwen Image Edit** — the best at removing/altering text in images;
+  Apache 2.0, outputs unrestricted (needs ~24 GB VRAM)
+
+Editor models download on first use (~12 GB / ~28 GB) after a prompt.
+Edited results land in the gallery like everything else, so you can
+chain edits: edit → select result → send it back in → edit again.
 
 ## Transparency
 

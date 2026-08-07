@@ -1,5 +1,14 @@
 # Changelog — Comic Book Art Creator
 
+## v1.4.0 — 2026-08-07
+- The reference feature is replaced by a true **image editor**
+  (Gemini-style): load image(s) and the prompt is the instruction —
+  change settings, remove words/titles, move characters to new scenes,
+  increase details, combine images. Two engines: **Flux Kontext** (best
+  overall) and **Qwen Image Edit** (best text removal, Apache 2.0),
+  selectable in the editor row; models self-install on first use.
+- Border-reference influence slider moved into the Border maker section.
+
 ## v1.3.4 — 2026-08-07
 - "🗑 Delete image" button: permanently deletes the selected image from
   disk and the history strip (with confirm) — generate variations, keep

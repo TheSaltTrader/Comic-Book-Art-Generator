@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.4.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -195,7 +195,9 @@ def start_engine():
         "  vae: vae\n"
         "  upscale_models: upscale_models\n"
         "  ipadapter: ipadapter\n"
-        "  clip_vision: clip_vision\n", encoding="utf-8")
+        "  clip_vision: clip_vision\n"
+        "  diffusion_models: diffusion_models\n"
+        "  text_encoders: text_encoders\n", encoding="utf-8")
     cmd = [str(engine_python()), "main.py",
            "--listen", ENGINE_HOST, "--port", str(ENGINE_PORT),
            "--extra-model-paths-config", str(EXTRA_PATHS_YAML),
@@ -421,8 +423,115 @@ FAMILY_DEFAULTS = {
 }
 
 
+EDITOR_ENGINES = {
+    "Flux Kontext — best overall edits": "kontext",
+    "Qwen Image Edit — best text removal (Apache)": "qwen",
+}
+KONTEXT_FILE = "flux1-dev-kontext_fp8_scaled.safetensors"
+QWEN_EDIT_FILE = "qwen_image_edit_2511_fp8mixed.safetensors"
+QWEN_TE_FILE = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+QWEN_VAE_FILE = "qwen_image_vae.safetensors"
+FLUX_CLIP_SRC = "flux1-dev-fp8.safetensors"   # donates CLIP+VAE to Kontext
+
+
+def build_kontext_graph(p):
+    """Instruction edit via FLUX.1 Kontext: the loaded image(s) are the
+    context, the prompt says what to change."""
+    g = {}
+    g["1"] = {"class_type": "UNETLoader",
+              "inputs": {"unet_name": KONTEXT_FILE,
+                         "weight_dtype": "default"}}
+    g["2"] = {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": FLUX_CLIP_SRC}}
+    g["4"] = {"class_type": "CLIPTextEncode",
+              "inputs": {"text": p["prompt"], "clip": ["2", 1]}}
+    img_ref, nid, sid = None, 10, 20
+    for name in p["edit_image_names"][:4]:
+        g[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        if img_ref is None:
+            img_ref = [str(nid), 0]
+        else:
+            g[str(sid)] = {"class_type": "ImageStitch",
+                           "inputs": {"image1": img_ref,
+                                      "image2": [str(nid), 0],
+                                      "direction": "right",
+                                      "match_image_size": True,
+                                      "spacing_width": 0,
+                                      "spacing_color": "white"}}
+            img_ref = [str(sid), 0]
+            sid += 1
+        nid += 1
+    g["30"] = {"class_type": "FluxKontextImageScale",
+               "inputs": {"image": img_ref}}
+    g["31"] = {"class_type": "VAEEncode",
+               "inputs": {"pixels": ["30", 0], "vae": ["2", 2]}}
+    g["32"] = {"class_type": "ReferenceLatent",
+               "inputs": {"conditioning": ["4", 0], "latent": ["31", 0]}}
+    g["33"] = {"class_type": "FluxGuidance",
+               "inputs": {"conditioning": ["32", 0], "guidance": 2.5}}
+    g["34"] = {"class_type": "ConditioningZeroOut",
+               "inputs": {"conditioning": ["4", 0]}}
+    g["6"] = {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["33", 0],
+                         "negative": ["34", 0], "latent_image": ["31", 0],
+                         "seed": p["seed"], "steps": p.get("steps") or 20,
+                         "cfg": 1.0, "sampler_name": "euler",
+                         "scheduler": "simple", "denoise": 1.0}}
+    g["7"] = {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["2", 2]}}
+    g["8"] = {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "cbac", "images": ["7", 0]}}
+    return g
+
+
+def build_qwen_edit_graph(p):
+    """Instruction edit via Qwen-Image-Edit (Apache 2.0) — strongest at
+    removing/altering text in images."""
+    g = {}
+    g["1"] = {"class_type": "UNETLoader",
+              "inputs": {"unet_name": QWEN_EDIT_FILE,
+                         "weight_dtype": "default"}}
+    g["2"] = {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": QWEN_TE_FILE, "type": "qwen_image",
+                         "device": "default"}}
+    g["3"] = {"class_type": "VAELoader",
+              "inputs": {"vae_name": QWEN_VAE_FILE}}
+    load_refs, nid = [], 10
+    for name in p["edit_image_names"][:3]:
+        g[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        load_refs.append([str(nid), 0])
+        nid += 1
+    enc_pos = {"clip": ["2", 0], "prompt": p["prompt"], "vae": ["3", 0]}
+    enc_neg = {"clip": ["2", 0], "prompt": "", "vae": ["3", 0]}
+    for i, ref in enumerate(load_refs, 1):
+        enc_pos[f"image{i}"] = ref
+        enc_neg[f"image{i}"] = ref
+    g["20"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": enc_pos}
+    g["21"] = {"class_type": "TextEncodeQwenImageEditPlus", "inputs": enc_neg}
+    g["30"] = {"class_type": "ImageScaleToTotalPixels",
+               "inputs": {"image": load_refs[0],
+                          "upscale_method": "lanczos", "megapixels": 1.0,
+                          "resolution_steps": 1}}
+    g["31"] = {"class_type": "VAEEncode",
+               "inputs": {"pixels": ["30", 0], "vae": ["3", 0]}}
+    g["6"] = {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["20", 0],
+                         "negative": ["21", 0], "latent_image": ["31", 0],
+                         "seed": p["seed"], "steps": p.get("steps") or 20,
+                         "cfg": 2.5, "sampler_name": "euler",
+                         "scheduler": "simple", "denoise": 1.0}}
+    g["7"] = {"class_type": "VAEDecode",
+              "inputs": {"samples": ["6", 0], "vae": ["3", 0]}}
+    g["8"] = {"class_type": "SaveImage",
+              "inputs": {"filename_prefix": "cbac", "images": ["7", 0]}}
+    return g
+
+
 def build_graph(p):
     """Build a ComfyUI prompt graph from generation params dict."""
+    if p.get("edit_image_names"):
+        return build_qwen_edit_graph(p) if p.get("editor") == "qwen" \
+            else build_kontext_graph(p)
     fam = model_family(p["model"])
     d = FAMILY_DEFAULTS[fam]
     steps = p.get("steps") or d["steps"]
@@ -685,10 +794,9 @@ class Generator:
     def _run(self, params):
         import websocket  # websocket-client
         if params.get("ref_images"):
-            # references override style/composition/characters (IP-Adapter)
-            params["style_ref_names"] = [self._upload_ref(rp)
-                                         for rp in params["ref_images"]]
-            params["ref_weight_type"] = "standard"
+            # instruction editing: the images are context for the prompt
+            params["edit_image_names"] = [self._upload_ref(rp)
+                                          for rp in params["ref_images"]]
         if params.get("border_cut"):
             w, h = params["width"], params["height"]
             # mask is slightly wider than the final cut so the art runs
@@ -1072,11 +1180,10 @@ class App:
         ttk.Button(seedrow, text="Reuse last", width=10,
                    command=self._reuse_seed).grid(row=0, column=3, padx=(10, 0))
 
-        # reference images — the override: art style, composition and
-        # characters come from these
-        ttk.Label(left, text="REFERENCE IMAGES (optional — overrides preset "
-                             "& LoRAs: the AI takes art style, composition "
-                             "and characters from them)",
+        # image editor — Gemini-style instruction editing
+        ttk.Label(left, text="IMAGE EDITOR (optional — load image(s) and "
+                             "your prompt edits them: change things, remove "
+                             "text, move characters to new scenes)",
                   style="Head.TLabel", wraplength=400,
                   justify="left").grid(row=r, sticky=W, pady=(8, 0)); r += 1
         rrow = ttk.Frame(left); rrow.grid(row=r, sticky=NSEW, pady=2); r += 1
@@ -1088,18 +1195,17 @@ class App:
                   wraplength=240).grid(row=0, column=1, sticky=W, padx=6)
         ttk.Button(rrow, text="✕", width=3,
                    command=self._clear_ref).grid(row=0, column=2)
-        chrow = ttk.Frame(left); chrow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
-        ttk.Label(chrow, text="Reference influence",
-                  style="Dim.TLabel").pack(side="left")
-        self.change_var = DoubleVar(value=60)
-        ttk.Scale(chrow, from_=10, to=95, variable=self.change_var,
-                  length=150).pack(side="left", padx=6)
-        self.change_lab = ttk.Label(chrow, text="60%", width=5,
-                                    style="Dim.TLabel")
-        self.change_lab.pack(side="left")
-        self.change_var.trace_add(
-            "write", lambda *_a: self.change_lab.config(
-                text=f"{int(self.change_var.get())}%"))
+        erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
+        erow.columnconfigure(1, weight=1)
+        ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
+                                                                column=0)
+        self.editor_var = StringVar(value=list(EDITOR_ENGINES)[0])
+        ttk.Combobox(erow, textvariable=self.editor_var, state="readonly",
+                     exportselection=False,
+                     values=list(EDITOR_ENGINES)).grid(row=0, column=1,
+                                                       padx=(4, 0),
+                                                       sticky="ew")
+        self.change_var = DoubleVar(value=60)   # border-ref influence
 
         # generate
         self.go_btn = ttk.Button(left, text="⚡  GENERATE", style="Go.TButton",
@@ -1168,9 +1274,17 @@ class App:
                                                            sticky=W, padx=6)
         ttk.Button(brefrow, text="✕", width=3,
                    command=self._clear_border_refs).grid(row=0, column=2)
-        ttk.Label(left, text="Refs guide the border art (uses the 'Change "
-                             "amount' slider above for influence).",
-                  style="Dim.TLabel", wraplength=400).grid(row=r, sticky=W); r += 1
+        birow = ttk.Frame(left); birow.grid(row=r, sticky=NSEW, pady=(0, 2)); r += 1
+        ttk.Label(birow, text="Ref influence",
+                  style="Dim.TLabel").pack(side="left")
+        ttk.Scale(birow, from_=10, to=95, variable=self.change_var,
+                  length=150).pack(side="left", padx=6)
+        self.change_lab = ttk.Label(birow, text="60%", width=5,
+                                    style="Dim.TLabel")
+        self.change_lab.pack(side="left")
+        self.change_var.trace_add(
+            "write", lambda *_a: self.change_lab.config(
+                text=f"{int(self.change_var.get())}%"))
         btrow = ttk.Frame(left); btrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(btrow, text="Thickness", style="Dim.TLabel").pack(side="left")
         self.border_thick_var = DoubleVar(value=14)
@@ -1263,6 +1377,7 @@ class App:
             "loras": self._selected_loras(),
             "lora_strength": round(self.lora_strength.get(), 2),
             "ref_images": self.ref_paths,
+            "editor": self.editor_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
             "border_theme": self._get(self.border_prompt_box),
@@ -1304,6 +1419,8 @@ class App:
                 first = Path(self.ref_paths[0]).name
                 self.ref_var.set(first if len(self.ref_paths) == 1 else
                                  f"{len(self.ref_paths)} images ({first}, …)")
+            if st.get("editor") in EDITOR_ENGINES:
+                self.editor_var.set(st["editor"])
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
             if self.border_ref_paths:
@@ -1343,7 +1460,7 @@ class App:
         for var in (self.model_var, self.preset_var, self.size_var,
                     self.steps_var, self.seed_var, self.batch_var,
                     self.transparent_var, self.random_seed_var,
-                    self.lora_strength, self.change_var,
+                    self.lora_strength, self.change_var, self.editor_var,
                     self.border_auto_var, self.border_aspect_var,
                     self.border_thick_var, self.border_style_var,
                     self.border_model_var, self.border_count_var):
@@ -1716,27 +1833,60 @@ class App:
             full_prompt = prompt
         else:
             full_prompt = f"{prompt}, {style}" if style else prompt
+        editing = bool(self.ref_paths)
+        editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
         model = self._model_raw()
-        if not model:
-            messagebox.showerror("Model", "No model selected — hit ↻ or wait "
-                                          "for downloads to finish.")
-            return
-        if not self._model_fits.get(model, True):
-            self._vram_block_msg(model)
-            return
-        # the engine must actually know this model, or generation 400s —
-        # a stale engine (old model paths) is fixed by a restart
-        known = _api_choices("CheckpointLoaderSimple", "ckpt_name")
-        if known and model not in known and \
-                (MODELS / "checkpoints" / model).exists():
-            if messagebox.askyesno(
-                    "Engine restart needed",
-                    "The engine was started with old settings and can't "
-                    "see this model yet.\n\nRestart the engine now? "
-                    "(takes ~a minute, then hit Generate again)"):
+        if editing:
+            need = 16 if editor == "kontext" else 24
+            if self.vram_gb is not None and self.vram_gb < need:
+                messagebox.showwarning(
+                    "Not enough GPU memory",
+                    f"This editor needs about {need} GB of VRAM — your "
+                    f"card has {self.vram_gb:.1f} GB.")
+                return
+            missing = self._editor_missing(editor)
+            if missing:
+                gb = "12" if editor == "kontext" else "28"
+                if messagebox.askyesno(
+                        "Install editor",
+                        f"The image editor needs {len(missing)} model "
+                        f"file(s) (~{gb} GB) that aren't installed yet."
+                        "\n\nDownload now? Watch the status bar; hit "
+                        "Generate again when it says done."):
+                    threading.Thread(target=self._install_editor,
+                                     args=(editor, missing),
+                                     daemon=True).start()
+                return
+            if not self._engine_knows_editor(editor):
+                self.status_var.set("Restarting engine to load the editor "
+                                    "files — wait for 'Engine ready.', "
+                                    "then Generate again.")
                 threading.Thread(target=self._restart_engine,
                                  daemon=True).start()
-            return
+                return
+            model = f"editor:{editor}"
+        else:
+            if not model:
+                messagebox.showerror("Model", "No model selected — hit ↻ "
+                                              "or wait for downloads to "
+                                              "finish.")
+                return
+            if not self._model_fits.get(model, True):
+                self._vram_block_msg(model)
+                return
+            # the engine must actually know this model, or generation
+            # 400s — a stale engine (old model paths) needs a restart
+            known = _api_choices("CheckpointLoaderSimple", "ckpt_name")
+            if known and model not in known and \
+                    (MODELS / "checkpoints" / model).exists():
+                if messagebox.askyesno(
+                        "Engine restart needed",
+                        "The engine was started with old settings and "
+                        "can't see this model yet.\n\nRestart the engine "
+                        "now? (takes ~a minute, then hit Generate again)"):
+                    threading.Thread(target=self._restart_engine,
+                                     daemon=True).start()
+                return
 
         strength = round(self.lora_strength.get(), 2)
         loras = [] if self.ref_paths else \
@@ -1760,30 +1910,15 @@ class App:
                       transparent=self.transparent_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
-                      style_weight=round(self.change_var.get() / 100, 2),
+                      editor=editor,
                       denoise=round(self.change_var.get() / 100, 2))
-        if self.ref_paths:
-            if model_family(model) in ("flux", "schnell"):
-                messagebox.showinfo(
-                    "Reference images",
-                    "Reference images use IP-Adapter, which works with "
-                    "SDXL-family models (Juggernaut, DreamShaper, "
-                    "Animagine). Pick one of those.")
-                return
-            if not self._style_support_ok():
-                if messagebox.askyesno(
-                        "Install reference add-on",
-                        "Reference images need the IP-Adapter add-on (a "
-                        "node plus ~3.2 GB of models), which isn't "
-                        "installed yet.\n\nInstall it now? The engine "
-                        "restarts when done — then hit Generate again."):
-                    threading.Thread(target=self._install_style_support,
-                                     daemon=True).start()
-                return
-            self.status_var.set("Reference override active — preset style "
-                                "and LoRAs are ignored for this run.")
-
-        self.settings["last_model"] = model
+        if editing:
+            self.status_var.set("Editing with "
+                                f"{'Flux Kontext' if editor == 'kontext' else 'Qwen Image Edit'} "
+                                "— the prompt is the instruction; preset "
+                                "and LoRAs are ignored.")
+        else:
+            self.settings["last_model"] = model
         self._persist()
         self.busy = True
         self.go_btn.state(["disabled"])
@@ -2094,6 +2229,52 @@ class App:
         threading.Thread(target=gen.run, args=(params,),
                          daemon=True).start()
         self.status_var.set("Generating border…")
+
+    # -------------------------------------------------- image editor
+    EDITOR_FILES = {
+        "kontext": [("diffusion_models", KONTEXT_FILE)],
+        "qwen": [("diffusion_models", QWEN_EDIT_FILE),
+                 ("text_encoders", QWEN_TE_FILE),
+                 ("vae", QWEN_VAE_FILE)],
+    }
+
+    def _editor_missing(self, engine):
+        missing = [(d, f) for d, f in self.EDITOR_FILES[engine]
+                   if not (MODELS / d / f).exists()]
+        if engine == "kontext" and \
+                not (MODELS / "checkpoints" / FLUX_CLIP_SRC).exists():
+            missing.append(("checkpoints", FLUX_CLIP_SRC))
+        return missing
+
+    def _install_editor(self, engine, missing):
+        try:
+            entries = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            entries = []
+        for d, f in missing:
+            e = next((x for x in entries
+                      if x["dir"] == d and x["local"] == f), None)
+            if not e:
+                self.ui_queue.put(("error", f"no download source for {f}"))
+                return
+            self.ui_queue.put(("status", f"Downloading {f}…"))
+            try:
+                download_model_update(
+                    dict(e, size=0),
+                    lambda s: self.ui_queue.put(("status", s)))
+            except Exception as ex:
+                self.ui_queue.put(("error", f"download failed: {ex}"))
+                return
+        self.ui_queue.put(("status", "Editor installed — hit Generate "
+                                     "again."))
+
+    def _engine_knows_editor(self, engine):
+        try:
+            unets = _api_choices("UNETLoader", "unet_name")
+        except Exception:
+            return True   # engine not up yet; boot flow handles that
+        target = KONTEXT_FILE if engine == "kontext" else QWEN_EDIT_FILE
+        return target in unets
 
     # -------------------------------------------------- style add-on
     def _style_support_ok(self):
