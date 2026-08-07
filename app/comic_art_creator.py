@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -870,66 +870,6 @@ BORDER_TEMPLATE = (
     "dark center panel, high detail")
 
 
-BEZEL_POSITIONS = {
-    "Left panel":    lambda W, H, w, h: (int(0.01 * W), (H - h) // 2),
-    "Right panel":   lambda W, H, w, h: (W - w - int(0.01 * W), (H - h) // 2),
-    "Top left":      lambda W, H, w, h: (int(0.01 * W), int(0.01 * H)),
-    "Top center":    lambda W, H, w, h: ((W - w) // 2, int(0.005 * H)),
-    "Top right":     lambda W, H, w, h: (W - w - int(0.01 * W), int(0.01 * H)),
-    "Bottom left":   lambda W, H, w, h: (int(0.01 * W), H - h - int(0.01 * H)),
-    "Bottom center": lambda W, H, w, h: ((W - w) // 2, H - h - int(0.005 * H)),
-    "Bottom right":  lambda W, H, w, h: (W - w - int(0.01 * W),
-                                         H - h - int(0.01 * H)),
-}
-
-
-def make_collage(paths, w, h):
-    """Grid-fit multiple reference images onto one w×h canvas (cover-crop
-    per cell) — how several references become a single img2img init."""
-    import math
-    paths = list(paths)[:9]
-    n = max(1, len(paths))
-    cols = 1 if n == 1 else (2 if n <= 4 else 3)
-    rows = math.ceil(n / cols)
-    canvas = Image.new("RGB", (w, h), (16, 16, 20))
-    cw, ch = w // cols, h // rows
-    for i, p in enumerate(paths):
-        img = Image.open(p).convert("RGB")
-        s = max(cw / img.width, ch / img.height)
-        img = img.resize((int(img.width * s) + 1, int(img.height * s) + 1),
-                         Image.LANCZOS)
-        x0, y0 = (img.width - cw) // 2, (img.height - ch) // 2
-        img = img.crop((x0, y0, x0 + cw, y0 + ch))
-        canvas.paste(img, ((i % cols) * cw, (i // cols) * ch))
-    return canvas
-
-
-def compose_bezel(border_path, items, clip=False):
-    """Composite character/art PNGs onto a border. Each item: dict with
-    path, pos (BEZEL_POSITIONS key), size (% of border height), flip,
-    dx/dy nudge (% of canvas)."""
-    base = Image.open(border_path).convert("RGBA")
-    W, H = base.size
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    for it in items:
-        img = Image.open(it["path"]).convert("RGBA")
-        target_h = max(16, int(H * it["size"] / 100))
-        scale = target_h / img.height
-        img = img.resize((max(1, int(img.width * scale)), target_h),
-                         Image.LANCZOS)
-        if it.get("flip"):
-            img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        x, y = BEZEL_POSITIONS[it["pos"]](W, H, img.width, img.height)
-        x += int(W * it.get("dx", 0) / 100)
-        y += int(H * it.get("dy", 0) / 100)
-        layer.paste(img, (x, y), img)   # paste clips at canvas edges
-    if clip:
-        layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
-                                           base.getchannel("A")))
-    out = base.copy()
-    out.alpha_composite(layer)
-    return out
-
 
 def cut_center(img, thickness_pct):
     """Make the center of a border/frame image fully transparent, leaving
@@ -947,6 +887,19 @@ def cut_center(img, thickness_pct):
 # --------------------------------------------------------------------------
 # generation worker
 # --------------------------------------------------------------------------
+
+class ChannelQueue:
+    """Relabels progress messages so each section drives its own bar."""
+
+    def __init__(self, q, channel):
+        self.q, self.channel = q, channel
+
+    def put(self, msg):
+        if msg and msg[0] == "progress":
+            self.q.put((self.channel,) + tuple(msg[1:]))
+        else:
+            self.q.put(msg)
+
 
 class Generator:
     """Queues a prompt and streams progress/results back through a queue."""
@@ -1417,63 +1370,6 @@ class App:
         ttk.Label(left, textvariable=self.status_var,
                   style="Dim.TLabel", wraplength=400).grid(row=r, sticky=W); r += 1
 
-        # ---------- border maker (bottom of the panel) ----------
-        ttk.Label(left, text="BORDER MAKER — themed frame, transparent "
-                             "center, no text", style="Head.TLabel").grid(
-            row=r, sticky=W, pady=(14, 0)); r += 1
-        ttk.Label(left, text="Border prompt — a theme (franchise, movie, "
-                             "game, material) or a full precise prompt:",
-                  style="Dim.TLabel").grid(row=r, sticky=W); r += 1
-        self.border_prompt_box = self._text(left, 3)
-        self.border_prompt_box.grid(row=r, sticky="ew", pady=(2, 2)); r += 1
-        self.border_auto_var = BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Add frame wording automatically "
-                                   "(uncheck to use your prompt verbatim)",
-                        variable=self.border_auto_var).grid(
-            row=r, sticky=W, pady=(0, 4)); r += 1
-        ttk.Label(left, text="Uses the settings above: model, LoRAs, "
-                             "Variations, Steps, Seed and Editor all come "
-                             "from the main controls.",
-                  style="Dim.TLabel", wraplength=400,
-                  justify="left").grid(row=r, sticky=W); r += 1
-        barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
-        ttk.Label(barow, text="Aspect", style="Dim.TLabel").grid(row=0,
-                                                                 column=0)
-        self.border_aspect_var = StringVar(value=list(BORDER_SIZES)[2])
-        ttk.Combobox(barow, textvariable=self.border_aspect_var,
-                     state="readonly", exportselection=False,
-                     values=list(BORDER_SIZES),
-                     width=30).grid(row=0, column=1, padx=(4, 0), sticky=W)
-        brefrow = ttk.Frame(left); brefrow.grid(row=r, sticky=NSEW, pady=2); r += 1
-        brefrow.columnconfigure(1, weight=1)
-        ttk.Button(brefrow, text="🖼 Refs…", width=8,
-                   command=self._pick_border_refs).grid(row=0, column=0)
-        self.border_ref_var = StringVar(value="none")
-        ttk.Label(brefrow, textvariable=self.border_ref_var,
-                  style="Dim.TLabel", wraplength=250).grid(row=0, column=1,
-                                                           sticky=W, padx=6)
-        ttk.Button(brefrow, text="✕", width=3,
-                   command=self._clear_border_refs).grid(row=0, column=2)
-        ttk.Label(left, text="Refs use the Image editor above: they are "
-                             "redrawn as the border (style, characters and "
-                             "composition carry over).",
-                  style="Dim.TLabel", wraplength=400,
-                  justify="left").grid(row=r, sticky=W); r += 1
-        btrow = ttk.Frame(left); btrow.grid(row=r, sticky=NSEW, pady=2); r += 1
-        ttk.Label(btrow, text="Thickness", style="Dim.TLabel").pack(side="left")
-        self.border_thick_var = DoubleVar(value=14)
-        ttk.Scale(btrow, from_=6, to=30, variable=self.border_thick_var,
-                  length=150).pack(side="left", padx=6)
-        self.border_thick_lab = ttk.Label(btrow, text="14%", width=5,
-                                          style="Dim.TLabel")
-        self.border_thick_lab.pack(side="left")
-        self.border_thick_var.trace_add(
-            "write", lambda *_a: self.border_thick_lab.config(
-                text=f"{int(self.border_thick_var.get())}%"))
-        ttk.Button(left, text="⚡ Generate border",
-                   command=self._generate_border).grid(row=r, sticky="ew",
-                                                       pady=(4, 8)); r += 1
-
         # ---------- animator (old-school sprite animation) ----------
         ttk.Label(left, text="ANIMATOR — animate a character image into "
                              "sprite frames & GIF", style="Head.TLabel",
@@ -1531,7 +1427,78 @@ class App:
                                                          padx=(12, 0))
         ttk.Button(left, text="🎬 Generate animation",
                    command=self._generate_animation).grid(
-            row=r, sticky="ew", pady=(4, 8)); r += 1
+            row=r, sticky="ew", pady=(4, 2)); r += 1
+        apb = ttk.Frame(left); apb.grid(row=r, sticky=NSEW, pady=(0, 8)); r += 1
+        apb.columnconfigure(0, weight=1)
+        self.anim_progress = ttk.Progressbar(apb, mode="determinate")
+        self.anim_progress.grid(row=0, column=0, sticky="ew")
+        self.anim_pct_var = StringVar(value="")
+        ttk.Label(apb, textvariable=self.anim_pct_var, width=5,
+                  style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
+
+        # ---------- border maker (very bottom) ----------
+        ttk.Label(left, text="BORDER MAKER — themed frame, transparent "
+                             "center, no text", style="Head.TLabel").grid(
+            row=r, sticky=W, pady=(14, 0)); r += 1
+        ttk.Label(left, text="Border prompt — a theme (franchise, movie, "
+                             "game, material) or a full precise prompt:",
+                  style="Dim.TLabel").grid(row=r, sticky=W); r += 1
+        self.border_prompt_box = self._text(left, 3)
+        self.border_prompt_box.grid(row=r, sticky="ew", pady=(2, 2)); r += 1
+        self.border_auto_var = BooleanVar(value=True)
+        ttk.Checkbutton(left, text="Add frame wording automatically "
+                                   "(uncheck to use your prompt verbatim)",
+                        variable=self.border_auto_var).grid(
+            row=r, sticky=W, pady=(0, 4)); r += 1
+        ttk.Label(left, text="Uses the settings above: model, LoRAs, "
+                             "Variations, Steps, Seed and Editor all come "
+                             "from the main controls.",
+                  style="Dim.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W); r += 1
+        barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(barow, text="Aspect", style="Dim.TLabel").grid(row=0,
+                                                                 column=0)
+        self.border_aspect_var = StringVar(value=list(BORDER_SIZES)[2])
+        ttk.Combobox(barow, textvariable=self.border_aspect_var,
+                     state="readonly", exportselection=False,
+                     values=list(BORDER_SIZES),
+                     width=30).grid(row=0, column=1, padx=(4, 0), sticky=W)
+        brefrow = ttk.Frame(left); brefrow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        brefrow.columnconfigure(1, weight=1)
+        ttk.Button(brefrow, text="🖼 Refs…", width=8,
+                   command=self._pick_border_refs).grid(row=0, column=0)
+        self.border_ref_var = StringVar(value="none")
+        ttk.Label(brefrow, textvariable=self.border_ref_var,
+                  style="Dim.TLabel", wraplength=250).grid(row=0, column=1,
+                                                           sticky=W, padx=6)
+        ttk.Button(brefrow, text="✕", width=3,
+                   command=self._clear_border_refs).grid(row=0, column=2)
+        ttk.Label(left, text="Refs use the Image editor above: they are "
+                             "redrawn as the border (style, characters and "
+                             "composition carry over).",
+                  style="Dim.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W); r += 1
+        btrow = ttk.Frame(left); btrow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(btrow, text="Thickness", style="Dim.TLabel").pack(side="left")
+        self.border_thick_var = DoubleVar(value=14)
+        ttk.Scale(btrow, from_=6, to=30, variable=self.border_thick_var,
+                  length=150).pack(side="left", padx=6)
+        self.border_thick_lab = ttk.Label(btrow, text="14%", width=5,
+                                          style="Dim.TLabel")
+        self.border_thick_lab.pack(side="left")
+        self.border_thick_var.trace_add(
+            "write", lambda *_a: self.border_thick_lab.config(
+                text=f"{int(self.border_thick_var.get())}%"))
+        ttk.Button(left, text="⚡ Generate border",
+                   command=self._generate_border).grid(row=r, sticky="ew",
+                                                       pady=(4, 2)); r += 1
+        bpb = ttk.Frame(left); bpb.grid(row=r, sticky=NSEW, pady=(0, 8)); r += 1
+        bpb.columnconfigure(0, weight=1)
+        self.border_progress = ttk.Progressbar(bpb, mode="determinate")
+        self.border_progress.grid(row=0, column=0, sticky="ew")
+        self.border_pct_var = StringVar(value="")
+        ttk.Label(bpb, textvariable=self.border_pct_var, width=5,
+                  style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
 
         # ---------- right column: preview + gallery ----------
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
@@ -1551,8 +1518,6 @@ class App:
                    command=lambda: os.startfile(OUTPUT)).pack(side="left", padx=6)
         ttk.Button(brow, text="⬇ Get LoRAs (CivitAI)",
                    command=self._civitai_dialog).pack(side="left", padx=6)
-        ttk.Button(brow, text="🧩 Bezel composer",
-                   command=self._composer_dialog).pack(side="left", padx=6)
         ttk.Button(brow, text="⭐ Add to training set",
                    command=self._add_to_training).pack(side="left", padx=6)
         self.info_var = StringVar(value="")
@@ -2202,6 +2167,18 @@ class App:
                     self.progress["maximum"] = mx
                     self.progress["value"] = val
                     self.pct_var.set(f"{val * 100 / max(1, mx):.0f}%")
+                elif kind == "anim_progress":
+                    _, val, mx = msg
+                    self.anim_progress["maximum"] = mx
+                    self.anim_progress["value"] = val
+                    self.anim_pct_var.set(
+                        f"{val * 100 / max(1, mx):.0f}%")
+                elif kind == "border_progress":
+                    _, val, mx = msg
+                    self.border_progress["maximum"] = mx
+                    self.border_progress["value"] = val
+                    self.border_pct_var.set(
+                        f"{val * 100 / max(1, mx):.0f}%")
                 elif kind == "image":
                     _, img, params = msg
                     threading.Thread(target=self._finish_image,
@@ -2217,8 +2194,13 @@ class App:
                 elif kind == "done":
                     self.busy = False
                     self.go_btn.state(["!disabled"])
-                    self.progress["value"] = 0
-                    self.pct_var.set("")
+                    for bar, var in ((self.progress, self.pct_var),
+                                     (self.anim_progress,
+                                      self.anim_pct_var),
+                                     (self.border_progress,
+                                      self.border_pct_var)):
+                        bar["value"] = 0
+                        var.set("")
                 elif kind == "engine_ready":
                     self.status_var.set("Engine ready.")
                     self._refresh_models()
@@ -2536,8 +2518,8 @@ class App:
             out_size=(w, h) if refs else None)
         self.busy = True
         self.go_btn.state(["disabled"])
-        self.progress["value"] = 0
-        gen = Generator(self.ui_queue)
+        self.border_progress["value"] = 0
+        gen = Generator(ChannelQueue(self.ui_queue, "border_progress"))
         threading.Thread(target=gen.run, args=(params,),
                          daemon=True).start()
         self.status_var.set("Generating border…")
@@ -2768,7 +2750,7 @@ class App:
         try:
             status = lambda s: self.ui_queue.put(("status", s))
             status("Animating — uploading character…")
-            gen = Generator(self.ui_queue)
+            gen = Generator(ChannelQueue(self.ui_queue, "anim_progress"))
             name = gen._upload_ref(p["image"])
             prompt = (f"{p['action']}. The character performs the action "
                       "smoothly in place, full body visible, flat plain "
@@ -2870,154 +2852,6 @@ class App:
         self.status_var.set(
             f"Added to training set ({len(list(ds.glob('*.png')))} images) "
             "— captions are editable .txt files; see TRAINING.md.")
-
-    # -------------------------------------------------- bezel composer
-    def _composer_dialog(self):
-        """Composite character/art PNGs onto a border — the way franchise
-        bezels are really made: generated frame + official renders."""
-        dlg = Toplevel(self.root)
-        dlg.title("Bezel composer — put characters & art on a border")
-        dlg.configure(bg=BG)
-        dlg.geometry("760x560")
-        frm = ttk.Frame(dlg, padding=14)
-        frm.pack(fill="both", expand=True)
-        frm.columnconfigure(0, weight=1)
-
-        ttk.Label(frm, text=(
-            "HOW TO USE — 1) Load a border: best results with a Border-maker "
-            "output (border_*.png in the output\n"
-            "folder — transparent center, art on the edges) or any bezel PNG "
-            "with a transparent screen hole.\n"
-            "2) Add character/art images: transparent-background PNGs "
-            "(game/movie renders) work best.\n"
-            "3) Place them: side panels for tall characters (size 60–90%), "
-            "corners for emblems (20–35%).\n"
-            "Nudge sliders fine-tune position. 'Keep screen clear' stops "
-            "images from covering the center hole."),
-            style="Dim.TLabel", justify="left").grid(row=0, sticky=W)
-
-        # border picker
-        borrow = ttk.Frame(frm); borrow.grid(row=1, sticky="ew", pady=(10, 4))
-        borrow.columnconfigure(1, weight=1)
-        ttk.Button(borrow, text="🖼 Load border…",
-                   command=lambda: pick_border()).grid(row=0, column=0)
-        self._comp_border = None
-        bvar = StringVar(value="none")
-        ttk.Label(borrow, textvariable=bvar, style="Dim.TLabel").grid(
-            row=0, column=1, sticky=W, padx=8)
-
-        def pick_border():
-            p = filedialog.askopenfilename(
-                initialdir=str(OUTPUT),
-                filetypes=[("PNG with transparency", "*.png")], parent=dlg)
-            if p:
-                self._comp_border = p
-                bvar.set(Path(p).name)
-
-        # image items
-        items_frame = ttk.Frame(frm)
-        items_frame.grid(row=2, sticky="nsew", pady=4)
-        items_frame.columnconfigure(0, weight=1)
-        frm.rowconfigure(2, weight=1)
-        self._comp_items = []
-
-        def add_item():
-            if len(self._comp_items) >= 6:
-                return
-            p = filedialog.askopenfilename(
-                filetypes=[("Images", "*.png;*.webp")], parent=dlg)
-            if not p:
-                return
-            row = ttk.Frame(items_frame)
-            row.pack(fill="x", pady=2)
-            item = {"path": p, "row": row,
-                    "pos": StringVar(value="Left panel"
-                                     if len(self._comp_items) % 2 == 0
-                                     else "Right panel"),
-                    "size": IntVar(value=75), "flip": BooleanVar(value=False),
-                    "dx": IntVar(value=0), "dy": IntVar(value=0)}
-            ttk.Label(row, text=Path(p).name[:22], width=22,
-                      style="Dim.TLabel").pack(side="left")
-            ttk.Combobox(row, textvariable=item["pos"], state="readonly",
-                         exportselection=False, width=13,
-                         values=list(BEZEL_POSITIONS)).pack(side="left",
-                                                            padx=3)
-            ttk.Label(row, text="size%", style="Dim.TLabel").pack(side="left")
-            ttk.Spinbox(row, from_=10, to=100, textvariable=item["size"],
-                        exportselection=False, width=4).pack(side="left",
-                                                             padx=2)
-            ttk.Checkbutton(row, text="flip",
-                            variable=item["flip"]).pack(side="left", padx=2)
-            ttk.Label(row, text="x±", style="Dim.TLabel").pack(side="left")
-            ttk.Spinbox(row, from_=-30, to=30, textvariable=item["dx"],
-                        exportselection=False, width=4).pack(side="left")
-            ttk.Label(row, text="y±", style="Dim.TLabel").pack(side="left")
-            ttk.Spinbox(row, from_=-30, to=30, textvariable=item["dy"],
-                        exportselection=False, width=4).pack(side="left")
-            ttk.Button(row, text="✕", width=3,
-                       command=lambda: remove_item(item)).pack(side="right")
-            self._comp_items.append(item)
-
-        def remove_item(item):
-            item["row"].destroy()
-            self._comp_items.remove(item)
-
-        ttk.Button(frm, text="＋ Add image…", command=add_item).grid(
-            row=3, sticky=W, pady=4)
-
-        clip_var = BooleanVar(value=False)
-        out_var = StringVar(value="")
-        bottom = ttk.Frame(frm); bottom.grid(row=4, sticky="ew", pady=(8, 0))
-        ttk.Checkbutton(bottom, text="Keep screen area clear",
-                        variable=clip_var).pack(side="left")
-        ttk.Label(frm, textvariable=out_var, style="Dim.TLabel",
-                  wraplength=700).grid(row=5, sticky=W, pady=(6, 0))
-
-        def build(preview):
-            if not self._comp_border:
-                out_var.set("Load a border first.")
-                return
-            if not self._comp_items:
-                out_var.set("Add at least one image.")
-                return
-            try:
-                items = [dict(path=i["path"], pos=i["pos"].get(),
-                              size=i["size"].get(), flip=i["flip"].get(),
-                              dx=i["dx"].get(), dy=i["dy"].get())
-                         for i in self._comp_items]
-                img = compose_bezel(self._comp_border, items,
-                                    clip=clip_var.get())
-            except Exception as e:
-                out_var.set(f"Compose failed: {e}")
-                return
-            if preview:
-                pv = Toplevel(dlg)
-                pv.title("Preview")
-                pv.configure(bg=BG)
-                disp = img.copy()
-                disp.thumbnail((900, 560))
-                tkimg = ImageTk.PhotoImage(disp)
-                lbl = ttk.Label(pv, image=tkimg)
-                lbl.image = tkimg
-                lbl.pack(padx=8, pady=8)
-                return
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = OUTPUT / f"border_composed_{stamp}.png"
-            meta = PngInfo()
-            meta.add_text("comic_art_creator", json.dumps(
-                {"border": Path(self._comp_border).name,
-                 "images": [Path(i["path"]).name for i in items],
-                 "tool": "bezel composer"}))
-            img.save(path, pnginfo=meta)
-            params = dict(model="bezel composer", seed=0)
-            self.ui_queue.put(("finished_image", img, params, path))
-            out_var.set(f"Saved {path.name} — it's in the gallery and the "
-                        "output folder.")
-
-        ttk.Button(bottom, text="👁 Preview",
-                   command=lambda: build(True)).pack(side="right", padx=(6, 0))
-        ttk.Button(bottom, text="🧩 Compose & save", style="Go.TButton",
-                   command=lambda: build(False)).pack(side="right")
 
     # -------------------------------------------------- civitai loras
     def _civitai_dialog(self):

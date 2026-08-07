@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.2 — 2026-08-07
+- Each section has its own progress bar + percent: the main bar serves
+  only the main generation; the Animator and Border maker got dedicated
+  bars under their generate buttons.
+- Sections reordered: Animator above, Border maker at the very bottom.
+- Bezel composer removed (superseded by the Image editor + border
+  references); its code is deleted.
+
 ## v1.7.1 — 2026-08-07
 - Progress everywhere, with percentages: Setup shows one overall bar +
   percent across the entire installation (runtime, packages, engine,

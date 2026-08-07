@@ -29,24 +29,17 @@ On start the app also **checks for newer releases of the installed models
 (HuggingFace) and of the ComfyUI engine (GitHub)** and asks (yes/no popup)
 before updating anything.
 
-## Border maker & Bezel composer
+## Border maker
 
-The **Border maker** (bottom of the left panel) generates themed 4:3/16:9
-frames with a transparent screen hole. It mimics the main controls —
-model, LoRAs, Variations, Steps, Seed and Editor selections all come
-from above; the section itself only sets the border prompt, aspect,
-thickness and references. Masked generation keeps the center empty;
-prompts are text-free by design. Load **reference images** and they go
-through the Image editor instead: the reference is redrawn as the frame,
-carrying over its style, characters and composition.
-
-The **🧩 Bezel composer** (button under the preview) finishes the job the
-way real arcade bezels are made: load a border (a `border_*.png` you
-generated, or any bezel PNG with a transparent hole), add
-transparent-background character/art PNGs (game or movie renders), place
-them on the side panels or corners with size/flip/nudge controls, preview,
-and save. Note: images of franchise characters carry their own copyright —
-fine for a personal cab, not redistributable.
+The **Border maker** (very bottom of the left panel) generates themed
+4:3/16:9 frames with a transparent screen hole. It mimics the main
+controls — model, LoRAs, Variations, Steps, Seed and Editor selections
+all come from above; the section itself only sets the border prompt,
+aspect, thickness and references, and has its own progress bar. Masked
+generation keeps the center empty; prompts are text-free by design. Load
+**reference images** and they go through the Image editor instead: the
+reference is redrawn as the frame, carrying over its style, characters
+and composition.
 
 ## The models
 
