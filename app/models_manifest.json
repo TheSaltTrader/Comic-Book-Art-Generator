@@ -1,0 +1,14 @@
+[
+  {"repo": "Comfy-Org/flux1-dev",                              "remote_file": "flux1-dev-fp8.safetensors",                          "local": "flux1-dev-fp8.safetensors",           "dir": "checkpoints"},
+  {"repo": "Comfy-Org/flux1-schnell",                          "remote_file": "flux1-schnell-fp8.safetensors",                      "local": "Flux1-Schnell-fp8.safetensors",       "dir": "checkpoints"},
+  {"repo": "RunDiffusion/Juggernaut-XL-v9",                    "remote_file": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",  "local": "Juggernaut-XL-v9.safetensors",        "dir": "checkpoints"},
+  {"repo": "Lykon/dreamshaper-xl-v2-turbo",                    "remote_file": "DreamShaperXL_Turbo_v2_1.safetensors",               "local": "DreamShaperXL-Turbo-v2.1.safetensors", "dir": "checkpoints"},
+  {"repo": "cagliostrolab/animagine-xl-4.0",                   "remote_file": "animagine-xl-4.0-opt.safetensors",                   "local": "Animagine-XL-4.0.safetensors",        "dir": "checkpoints"},
+  {"repo": "renderartist/retrocomicflux",                      "remote_file": "Retro_Comic_Flux_v2_renderartist.safetensors",       "local": "Flux_RetroComic_v2.safetensors",      "dir": "loras"},
+  {"repo": "XLabs-AI/flux-lora-collection",                    "remote_file": "art_lora_comfy_converted.safetensors",               "local": "Flux_ArtStyle_XLabs.safetensors",     "dir": "loras"},
+  {"repo": "XLabs-AI/flux-lora-collection",                    "remote_file": "realism_lora_comfy_converted.safetensors",           "local": "Flux_Realism_XLabs.safetensors",      "dir": "loras"},
+  {"repo": "blink7630/graphic-novel-illustration",             "remote_file": "Graphic_Novel_Illustration-000007.safetensors",      "local": "SDXL_GraphicNovel.safetensors",       "dir": "loras"},
+  {"repo": "alvdansen/BandW-Manga",                            "remote_file": "BW-000014.safetensors",                              "local": "SDXL_BW_Manga.safetensors",           "dir": "loras"},
+  {"repo": "artificialguybr/LineAniRedmond-LinearMangaSDXL-V2","remote_file": "LineAniRedmondV2-Lineart-LineAniAF.safetensors",     "local": "SDXL_LineArt_Manga.safetensors",      "dir": "loras"},
+  {"repo": "Linaqruf/style-enhancer-xl-lora",                  "remote_file": "style-enhancer-xl.safetensors",                      "local": "SDXL_StyleEnhancer_Anime.safetensors", "dir": "loras"}
+]

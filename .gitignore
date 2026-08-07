@@ -1,0 +1,29 @@
+# --- runtime / installed by Setup.exe (multi-GB, never in git) ---
+ComfyUI/
+venv/
+python/
+models/
+dist_app/
+dist_setup/
+_setup_tmp/
+_upd_tmp/
+
+# --- user data & generated art ---
+output/
+training/
+border/
+app/settings.json
+extra_model_paths.yaml
+engine.log
+engine_err.log
+gui_err.log
+setup.log
+engine_version.json
+
+# --- binaries: shipped as GitHub Release assets, not in git ---
+*.exe
+releases/
+
+# --- python noise ---
+__pycache__/
+*.pyc

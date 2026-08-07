@@ -1,0 +1,158 @@
+{
+  "presets": [
+    {
+      "name": "Golden Age (1940s)",
+      "style": "vintage 1940s golden age comic book art, bold heavy inks, flat primary colors, aged newsprint paper texture, halftone dots, dramatic heroic poses, classic comic panel",
+      "negative": "photo, photorealistic, 3d render, modern digital art, gradient shading, blurry",
+      "example": "a caped superhero punching a robot on a city rooftop at night, lightning in the sky",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Silver Age / Kirby",
+      "style": "1960s silver age comic book art in the style of dynamic kirby krackle energy dots, bold foreshortened action poses, saturated four-color printing, thick confident ink lines",
+      "negative": "photo, photorealistic, 3d render, muted colors, watercolor, blurry",
+      "example": "a cosmic titan emerging from a swirling portal in deep space, energy crackling around his fists",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Modern Superhero Cover",
+      "style": "modern comic book cover art, dynamic composition, cinematic lighting, detailed digital inks, vibrant colors with dramatic rim light, high detail, trending comic cover illustration",
+      "negative": "photo, amateur, sketch, unfinished, blurry, low detail",
+      "example": "an armored heroine landing in a crater on a rain-soaked street, glowing eyes, cape flowing",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Noir / Sin City",
+      "style": "stark black and white noir comic art, high contrast chiaroscuro, heavy black shadows, single spot color red, gritty ink brushwork, rain and cigarette smoke atmosphere",
+      "negative": "color, cheerful, soft lighting, watercolor, photo, 3d render",
+      "example": "a trench-coated detective under a flickering streetlamp, silhouette of a woman in a red dress in the doorway behind him",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Manga (B&W)",
+      "style": "black and white manga art, screentone shading, clean sharp linework, dramatic speed lines, expressive faces, detailed backgrounds, professional manga panel",
+      "negative": "color, western comic style, photo, 3d render, messy lines",
+      "example": "a high school swordsman in a torn uniform mid-slash, cherry blossoms scattering, motion lines",
+      "model_hint": "anime"
+    },
+    {
+      "name": "Anime Color Key",
+      "style": "vibrant anime key visual illustration, cel shading, luminous color palette, detailed eyes, dynamic angle, studio quality anime art",
+      "negative": "western comic, photo, 3d render, muted, sketch",
+      "example": "a mecha pilot girl in the open cockpit of a giant robot at sunset, wind in her hair",
+      "model_hint": "anime"
+    },
+    {
+      "name": "Ligne Claire (Tintin)",
+      "style": "franco-belgian ligne claire comic art, uniform clean outlines, flat bright colors, no hatching, detailed architectural backgrounds, classic european album style",
+      "negative": "shading, gradients, photo, 3d render, messy lines, dark atmosphere",
+      "example": "a young reporter and his white dog running through a moroccan market chased by men in fezzes",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Moebius / Heavy Metal",
+      "style": "surreal european science fiction comic art in the style of intricate fine linework, psychedelic pastel color palette, vast alien landscapes, airbrush gradients, 1970s heavy metal magazine illustration",
+      "negative": "photo, 3d render, dark gritty, simple background, low detail",
+      "example": "a lone rider on a white bird-creature crossing an endless crystal desert under twin suns",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Pop Art Halftone",
+      "style": "1960s pop art comic panel, large ben-day halftone dots, bold black outlines, limited primary color palette, dramatic close-up, retro print texture, speech-bubble era styling",
+      "negative": "photo, realistic shading, 3d render, muted colors, fine detail",
+      "example": "a crying woman on a telephone, dramatic close-up, yellow hair, blue background",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Painted Realism (Alex Ross)",
+      "style": "painted photorealistic comic book art, gouache painting, dramatic natural lighting, heroic low angle, museum quality superhero portrait, visible brushwork, epic composition",
+      "negative": "cel shading, flat colors, cartoon, anime, sketch, lineart",
+      "example": "an aging superman figure standing in golden dawn light, cape tattered, looking over a city skyline",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Cel-Shaded Webcomic",
+      "style": "modern webcomic art style, clean cel shading, bold simple shapes, bright appealing palette, expressive character acting, crisp digital lines",
+      "negative": "photo, 3d render, gritty, heavy texture, muted colors",
+      "example": "a barista witch making a potion latte, cozy magical coffee shop, cat familiar on the counter",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Watercolor Indie",
+      "style": "indie graphic novel watercolor art, loose expressive ink lines, soft watercolor washes, textured paper, muted earthy palette, intimate slice-of-life mood",
+      "negative": "digital cel shading, superhero, photo, 3d render, saturated neon",
+      "example": "two friends sharing umbrella on a rainy tokyo street, reflections in puddles, quiet evening",
+      "model_hint": "flux"
+    },
+    {
+      "name": "EC Horror (1950s)",
+      "style": "1950s EC horror comic art, lurid pulp colors, heavy crosshatched inks, dramatic ghoulish lighting from below, aged pulp paper, vintage horror anthology cover",
+      "negative": "photo, 3d render, modern digital, clean minimalist, cheerful",
+      "example": "a skeletal crypt keeper rising from a fog-covered grave, full moon, terrified gravedigger dropping his lantern",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Cyberpunk Neon",
+      "style": "cyberpunk comic book art, neon-drenched color palette, magenta and cyan rim lighting, rain-slick streets, holographic signage, detailed tech, cinematic wide panel",
+      "negative": "daylight, pastoral, vintage, watercolor, photo, low detail",
+      "example": "a chrome-armed hacker jacked into a glowing terminal in a noodle bar, neon kanji signs reflecting in her mirrored eyes",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Gritty 90s Image",
+      "style": "1990s image comics style art, extreme detailed crosshatching, exaggerated musculature, dynamic impossible pose, ammo pouches and shoulder pads, edgy antihero energy, saturated airbrush colors",
+      "negative": "photo, minimalist, ligne claire, watercolor, soft",
+      "example": "a masked mercenary with glowing sword leaping through an explosion, shell casings in the air",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Saturday Cartoon",
+      "style": "saturday morning cartoon style, bold rounded shapes, bright cheerful flat colors, thick outlines, expressive squash-and-stretch poses, kid-friendly adventure energy",
+      "negative": "realistic, gritty, photo, 3d render, dark, horror",
+      "example": "a plucky raccoon inventor riding a rocket skateboard past a surprised mailman, springs and gears flying",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Modern Comic Book",
+      "style": "modern comic book art, crisp digital inking, bold dynamic linework, rich flat colors with subtle gradients, dramatic panel composition, contemporary mainstream comic style",
+      "negative": "photo, photorealistic, 3d render, vintage, halftone, sketch, blurry",
+      "example": "a street-level vigilante crouched on a fire escape watching a deal go down in the alley below, city glow behind her",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Marvel House Style",
+      "style": "in the style of modern marvel comics interior art, dynamic superhero anatomy, kinetic action staging, polished digital colors with dramatic lighting, detailed inks, blockbuster comic book spread",
+      "negative": "photo, manga, chibi, watercolor, flat vector art, blurry",
+      "example": "a team of heroes charging through a collapsing skyscraper lobby toward an armored villain, debris and energy blasts everywhere",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Realistic Graphic Novel",
+      "style": "realistic graphic novel illustration, grounded human proportions, detailed realistic rendering with visible ink linework, muted cinematic color grading, mature serious tone",
+      "negative": "cartoon, chibi, exaggerated anatomy, bright saturated colors, anime",
+      "example": "a weary soldier sharing a cigarette with a stray dog in a bombed-out village street at dusk",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Photorealistic",
+      "style": "photorealistic cinematic still, hyperdetailed, natural skin texture, dramatic movie lighting, shallow depth of field, 8k detail, shot on cinema camera",
+      "negative": "cartoon, comic, illustration, drawing, anime, painting, lineart",
+      "example": "a superhero in a weathered practical costume standing in the rain on a neon-lit street, steam rising from a manhole",
+      "model_hint": "flux"
+    },
+    {
+      "name": "Dark & Gritty (DC-style)",
+      "style": "dark gritty comic book art, moody chiaroscuro lighting, heavy shadows and deep blacks, desaturated palette with selective color, rain and grime, brooding atmosphere, mature vigilante comic style",
+      "negative": "cheerful, bright colors, cartoon, chibi, clean minimalist, photo",
+      "example": "a caped figure looming atop a gargoyle over a rain-drenched gothic city, lightning silhouette",
+      "model_hint": "sdxl"
+    },
+    {
+      "name": "Fantasy Painted Cover",
+      "style": "epic painted fantasy comic cover art, oil painting technique, dramatic warm lighting, heroic composition, rich textured brushwork, classic fantasy paperback masterpiece",
+      "negative": "flat colors, cel shading, manga, modern digital vector, photo",
+      "example": "a barbarian queen with a greatsword standing over a slain wyrm on a mountain of treasure, torchlit cavern",
+      "model_hint": "flux"
+    }
+  ]
+}
