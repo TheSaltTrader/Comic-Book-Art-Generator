@@ -93,14 +93,28 @@ def run_install(skip_models, log, status, progress):
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     try:
         _run_install(skip_models, log, status, progress)
+        progress(1000, 1000)
     finally:
         shutil.rmtree(TMP_DIR, ignore_errors=True)
 
 
 def _run_install(skip_models, log, status, progress):
-    # ---- 1: bundled python runtime ----
+    # ---- overall progress plan: everything reports into one bar ----
+    needed = [] if skip_models else models_needed()
     pydir = PROJECT / "python"
     pyexe = pydir / "python.exe"
+    runtime_missing = not pyexe.exists()
+    engine_missing = not (PROJECT / "ComfyUI" / "main.py").exists()
+    RUNTIME_EST = (6 << 30) if runtime_missing else (256 << 20)
+    total_bytes = (sum(e.get("size") or 0 for e in needed)
+                   + RUNTIME_EST + ((60 << 20) if engine_missing else 0))
+    state = {"done": 0}
+
+    def adv(nbytes):
+        state["done"] = min(total_bytes, state["done"] + nbytes)
+        progress(int(state["done"] * 1000 / max(1, total_bytes)), 1000)
+
+    # ---- 1: bundled python runtime ----
     if pyexe.exists():
         log("Bundled Python runtime already present.")
     else:
@@ -108,7 +122,7 @@ def _run_install(skip_models, log, status, progress):
         log("Downloading embedded Python 3.12 runtime...")
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             z = Path(td) / "py.zip"
-            _download(PY_EMBED_URL, z, "python runtime", status, progress)
+            _download(PY_EMBED_URL, z, "python runtime", status, adv)
             pydir.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(z) as zf:
                 zf.extractall(pydir)
@@ -131,7 +145,7 @@ def _run_install(skip_models, log, status, progress):
         log("Installing pip into the bundled runtime...")
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             gp = Path(td) / "get-pip.py"
-            _download(GET_PIP_URL, gp, "pip installer", status, progress)
+            _download(GET_PIP_URL, gp, "pip installer", status, adv)
             _exec([str(pyexe), str(gp), "--no-warn-script-location"])
     log("pip ready.")
 
@@ -144,7 +158,7 @@ def _run_install(skip_models, log, status, progress):
         log("Downloading ComfyUI engine...")
         with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
             zpath = Path(td) / "comfy.zip"
-            _download(COMFY_ZIP, zpath, "engine", status, progress)
+            _download(COMFY_ZIP, zpath, "engine", status, adv)
             log("Extracting engine...")
             with zipfile.ZipFile(zpath) as z:
                 z.extractall(td)
@@ -163,12 +177,16 @@ def _run_install(skip_models, log, status, progress):
     # ---- 3: packages ----
     status("Installing PyTorch + engine packages (several GB - the slow "
            "part)...")
-    _pip(pyexe, ["install", "--upgrade", "pip"], log)
+    pip_budget = RUNTIME_EST - (20 << 20)
+    _pip(pyexe, ["install", "--upgrade", "pip"], log,
+         adv, pip_budget // 20)
     _pip(pyexe, ["install", "torch", "torchvision", "torchaudio",
-                 "--index-url", "https://download.pytorch.org/whl/cu128"], log)
-    _pip(pyexe, ["install", "-r", str(engine / "requirements.txt")], log)
+                 "--index-url", "https://download.pytorch.org/whl/cu128"],
+         log, adv, pip_budget // 2)
+    _pip(pyexe, ["install", "-r", str(engine / "requirements.txt")], log,
+         adv, pip_budget // 4)
     _pip(pyexe, ["install", "rembg", "onnxruntime", "websocket-client",
-                 "requests"], log)
+                 "requests"], log, adv, pip_budget // 5)
     r = subprocess.run([str(pyexe), "-c",
                         "import torch; print(torch.cuda.get_device_name(0) "
                         "if torch.cuda.is_available() else 'NOGPU')"],
@@ -217,12 +235,13 @@ def _run_install(skip_models, log, status, progress):
         status(f"Downloading model {i}/{len(needed)}: {e['local']} ({why})")
         url = (f"https://huggingface.co/{e['repo']}/resolve/main/"
                f"{e['remote_file']}")
-        _download(url, dest, e["local"], status, progress)
+        _download(url, dest, f"[{i}/{len(needed)}] {e['local']}", status,
+                  adv)
         log(f"[{i}/{len(needed)}] downloaded {e['local']} ({why})")
     log("Model pack complete - everything matches the latest releases.")
 
 
-def _download(url, dest, label, status, progress):
+def _download(url, dest, label, status, adv):
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     with requests.get(url, stream=True, timeout=60,
@@ -234,13 +253,11 @@ def _download(url, dest, label, status, progress):
             for chunk in r.iter_content(1 << 22):
                 fh.write(chunk)
                 done += len(chunk)
-                if total:
-                    progress(done, total)
-                    if done % (1 << 27) < (1 << 22):   # every ~128 MB
-                        status(f"{label}: {done / (1 << 30):.1f}/"
-                               f"{total / (1 << 30):.1f} GB")
+                adv(len(chunk))
+                if total and done % (1 << 27) < (1 << 22):  # ~128 MB
+                    status(f"{label}: {done / (1 << 30):.1f}/"
+                           f"{total / (1 << 30):.1f} GB")
     os.replace(tmp, dest)
-    progress(0, 100)
 
 
 def _exec(cmd):
@@ -250,11 +267,11 @@ def _exec(cmd):
         raise RuntimeError(f"{' '.join(map(str, cmd))}\n{r.stderr[-600:]}")
 
 
-def _pip(pyexe, args, log):
+def _pip(pyexe, args, log, adv=None, budget=0):
     proc = subprocess.Popen([str(pyexe), "-m", "pip"] + args + ["--no-color"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, creationflags=NO_WINDOW, env=PIP_ENV)
-    last = ""
+    last, spent, step = "", 0, max(1, budget // 40)
     for line in proc.stdout:
         line = line.rstrip()
         if line:
@@ -262,7 +279,12 @@ def _pip(pyexe, args, log):
             if line.startswith(("Collecting", "Installing", "Successfully",
                                 "Downloading")):
                 log("  " + line[:110])
+                if adv and spent < budget:
+                    adv(step)
+                    spent += step
     proc.wait()
+    if adv and spent < budget:
+        adv(budget - spent)   # close out this phase's share of the bar
     if proc.returncode != 0:
         raise RuntimeError(f"pip {' '.join(args[:2])} failed: {last}")
 
@@ -315,8 +337,14 @@ class SetupApp:
                             wrap="word")
         self.log_box.grid(row=2, sticky="nsew")
 
-        self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=3, sticky="ew", pady=(8, 2))
+        pfrm = ttk.Frame(frm)
+        pfrm.grid(row=3, sticky="ew", pady=(8, 2))
+        pfrm.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(pfrm, mode="determinate")
+        self.progress.grid(row=0, column=0, sticky="ew")
+        self.pct_var = StringVar(value="0%")
+        ttk.Label(pfrm, textvariable=self.pct_var, width=5).grid(
+            row=0, column=1, padx=(8, 0))
         self.status = StringVar(value="Ready.")
         ttk.Label(frm, textvariable=self.status, foreground=DIM).grid(
             row=4, sticky="w")
@@ -399,6 +427,7 @@ class SetupApp:
         def _do():
             self.progress.configure(mode="determinate", maximum=maximum)
             self.progress["value"] = value
+            self.pct_var.set(f"{value * 100 / max(1, maximum):.0f}%")
         self.root.after(0, _do)
 
     def on_close(self):

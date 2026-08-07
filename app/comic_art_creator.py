@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -282,23 +282,29 @@ def check_model_updates():
     return updates
 
 
-def download_model_update(entry, status_cb):
+def download_model_update(entry, status_cb, prog_cb=None):
     """Stream one updated model to a temp file, then swap it in place."""
     url = (f"https://huggingface.co/{entry['repo']}/resolve/main/"
            f"{entry['remote_file']}")
     dest = MODELS / entry["dir"] / entry["local"]
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
-    done, total_mb = 0, entry["size"] / (1024**2)
+    done = 0
     with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
+        total = int(r.headers.get("content-length", 0)) \
+            or entry.get("size") or 0
         with open(tmp, "wb") as fh:
             for chunk in r.iter_content(1 << 22):
                 fh.write(chunk)
                 done += len(chunk)
+                if prog_cb and total:
+                    prog_cb(done, total)
                 if done % (1 << 26) < (1 << 22):  # every ~64 MB
                     status_cb(f"Updating {entry['local']}: "
-                              f"{done / (1024**2):.0f}/{total_mb:.0f} MB")
+                              f"{done / (1024**2):.0f}"
+                              + (f"/{total / (1024**2):.0f} MB"
+                                 if total else " MB"))
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(tmp, dest)
@@ -1052,8 +1058,8 @@ class Generator:
             name = f"{j['subfolder']}/{name}"
         return name
 
-    def _await_images(self, ws, prompt_id):
-        ws.settimeout(600)
+    def _await_images(self, ws, prompt_id, timeout=600):
+        ws.settimeout(timeout)
         while True:
             msg = ws.recv()
             if isinstance(msg, bytes):
@@ -1370,9 +1376,14 @@ class App:
                    command=self._pick_ref).grid(row=0, column=0)
         self.ref_var = StringVar(value="none — text only")
         ttk.Label(rrow, textvariable=self.ref_var, style="Dim.TLabel",
-                  wraplength=240).grid(row=0, column=1, sticky=W, padx=6)
+                  wraplength=160).grid(row=0, column=1, sticky=W, padx=6)
+        self.editor_use_btn = ttk.Button(
+            rrow, text="Use selected", width=12,
+            command=self._use_selected_for_editor)
+        self.editor_use_btn.grid(row=0, column=2, padx=(0, 4))
+        self.editor_use_btn.state(["disabled"])   # until history has images
         ttk.Button(rrow, text="✕", width=3,
-                   command=self._clear_ref).grid(row=0, column=2)
+                   command=self._clear_ref).grid(row=0, column=3)
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         erow.columnconfigure(1, weight=1)
         ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
@@ -1395,8 +1406,13 @@ class App:
         self.go_btn = ttk.Button(left, text="⚡  GENERATE", style="Go.TButton",
                                  command=self._generate)
         self.go_btn.grid(row=r, sticky=NSEW, pady=(12, 4)); r += 1
-        self.progress = ttk.Progressbar(left, mode="determinate")
-        self.progress.grid(row=r, sticky=NSEW, pady=2); r += 1
+        pbrow = ttk.Frame(left); pbrow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        pbrow.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(pbrow, mode="determinate")
+        self.progress.grid(row=0, column=0, sticky="ew")
+        self.pct_var = StringVar(value="")
+        ttk.Label(pbrow, textvariable=self.pct_var, width=5,
+                  style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
         self.status_var = StringVar(value="Starting engine…")
         ttk.Label(left, textvariable=self.status_var,
                   style="Dim.TLabel", wraplength=400).grid(row=r, sticky=W); r += 1
@@ -1505,8 +1521,12 @@ class App:
         self.anim_transparent_var = BooleanVar(value=True)
         ttk.Checkbutton(a4, text="Transparent frames",
                         variable=self.anim_transparent_var).pack(side="left")
+        self.anim_gif_var = BooleanVar(value=True)
+        ttk.Checkbutton(a4, text="Make GIF",
+                        variable=self.anim_gif_var).pack(side="left",
+                                                         padx=(12, 0))
         self.anim_zip_var = BooleanVar(value=True)
-        ttk.Checkbutton(a4, text="Zip the animation folder",
+        ttk.Checkbutton(a4, text="Zip folder",
                         variable=self.anim_zip_var).pack(side="left",
                                                          padx=(12, 0))
         ttk.Button(left, text="🎬 Generate animation",
@@ -1601,6 +1621,7 @@ class App:
             "anim_loop": self.anim_loop_var.get(),
             "anim_size": self.anim_size_var.get(),
             "anim_transparent": self.anim_transparent_var.get(),
+            "anim_gif": self.anim_gif_var.get(),
             "anim_zip": self.anim_zip_var.get(),
             "border_theme": self._get(self.border_prompt_box),
             "border_auto": self.border_auto_var.get(),
@@ -1661,6 +1682,7 @@ class App:
             if st.get("anim_size") in ANIM_SIZES:
                 self.anim_size_var.set(st["anim_size"])
             self.anim_transparent_var.set(st.get("anim_transparent", True))
+            self.anim_gif_var.set(st.get("anim_gif", True))
             self.anim_zip_var.set(st.get("anim_zip", True))
             self._set(self.border_prompt_box, st.get("border_theme", ""))
             self.border_auto_var.set(st.get("border_auto", True))
@@ -1694,7 +1716,7 @@ class App:
                     self.border_thick_var, self.anim_secs_var,
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
-                    self.anim_zip_var):
+                    self.anim_gif_var, self.anim_zip_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box, self.anim_prompt_box):
@@ -1753,7 +1775,8 @@ class App:
         for u in ups:
             try:
                 if download_model_update(
-                        u, lambda s: self.ui_queue.put(("status", s))):
+                        u, lambda s: self.ui_queue.put(("status", s)),
+                        lambda d, t: self.ui_queue.put(("progress", d, t))):
                     ok += 1
                 else:
                     locked += 1
@@ -2016,6 +2039,47 @@ class App:
         self.border_ref_var.set("none")
         self._schedule_persist()
 
+    def _busy_guard(self):
+        """True = abort the new request. Offers to cancel the running job
+        so a stuck/slow generation can't lock the app."""
+        if not self.busy:
+            return False
+        if messagebox.askyesno(
+                "Generation in progress",
+                "A generation is still running (big models can take many "
+                "minutes — watch the progress bar).\n\nCancel it now?"):
+            try:
+                requests.post(f"{ENGINE_URL}/interrupt", timeout=5)
+            except requests.RequestException:
+                pass
+            self.busy = False
+            self.go_btn.state(["!disabled"])
+            self.progress["value"] = 0
+            self.pct_var.set("")
+            self.status_var.set("Cancelled.")
+        return True
+
+    def _use_selected_for_editor(self):
+        if self.current is None or not self.session:
+            return
+        _img, _params, path = self.session[self.current]
+        if str(path).lower().endswith(".gif"):
+            self.status_var.set("Pick a still image for the editor — GIFs "
+                                "can't be edited directly.")
+            return
+        self.ref_paths = [str(path)]
+        self.ref_var.set("selection")
+        self.status_var.set(f"Editor now works on the selected image "
+                            f"({Path(path).name}) — the prompt is the "
+                            "instruction.")
+        self._schedule_persist()
+
+    def _update_editor_btn(self):
+        if self.session:
+            self.editor_use_btn.state(["!disabled"])
+        else:
+            self.editor_use_btn.state(["disabled"])
+
     def _reuse_seed(self):
         if self.session:
             _, params, _ = self.session[self.current]
@@ -2024,7 +2088,7 @@ class App:
 
     # -------------------------------------------------- generation
     def _generate(self):
-        if self.busy:
+        if self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -2137,6 +2201,7 @@ class App:
                     _, val, mx = msg
                     self.progress["maximum"] = mx
                     self.progress["value"] = val
+                    self.pct_var.set(f"{val * 100 / max(1, mx):.0f}%")
                 elif kind == "image":
                     _, img, params = msg
                     threading.Thread(target=self._finish_image,
@@ -2147,11 +2212,13 @@ class App:
                     self.current = len(self.session) - 1
                     self._show_current()
                     self._add_thumb(self.current)
+                    self._update_editor_btn()
                     self.status_var.set(f"Saved  {path.name}")
                 elif kind == "done":
                     self.busy = False
                     self.go_btn.state(["!disabled"])
                     self.progress["value"] = 0
+                    self.pct_var.set("")
                 elif kind == "engine_ready":
                     self.status_var.set("Engine ready.")
                     self._refresh_models()
@@ -2221,7 +2288,49 @@ class App:
         return path
 
     # -------------------------------------------------- preview + gallery
+    def _draw_frame(self, img):
+        cw = max(self.canvas.winfo_width(), 50)
+        ch = max(self.canvas.winfo_height(), 50)
+        scale = min(cw / img.width, ch / img.height, 1.0)
+        disp = img.resize((int(img.width * scale), int(img.height * scale)),
+                          Image.LANCZOS)
+        self.canvas.delete("all")
+        self._tk_img = ImageTk.PhotoImage(disp)
+        self.canvas.create_image(cw // 2, ch // 2, image=self._tk_img)
+
+    def _stop_gif(self):
+        if getattr(self, "_gif_job", None):
+            self.root.after_cancel(self._gif_job)
+            self._gif_job = None
+        self._gif_frames = []
+
+    def _play_gif(self, path):
+        try:
+            from PIL import ImageSequence
+            im = Image.open(path)
+            frames, durs = [], []
+            for fr in ImageSequence.Iterator(im):
+                frames.append(fr.convert("RGBA"))
+                durs.append(max(20, int(fr.info.get("duration", 80))))
+        except Exception:
+            return False
+        if not frames:
+            return False
+        self._gif_frames, self._gif_durs, self._gif_idx = frames, durs, 0
+        self._gif_tick()
+        return True
+
+    def _gif_tick(self):
+        frames = getattr(self, "_gif_frames", [])
+        if not frames:
+            return
+        i = self._gif_idx % len(frames)
+        self._draw_frame(frames[i])
+        self._gif_idx += 1
+        self._gif_job = self.root.after(self._gif_durs[i], self._gif_tick)
+
     def _show_current(self):
+        self._stop_gif()
         self.canvas.delete("all")
         if self.current is None or not self.session:
             self.canvas.create_text(
@@ -2230,13 +2339,12 @@ class App:
                 font=("Segoe UI", 16))
             return
         img, params, path = self.session[self.current]
-        cw = max(self.canvas.winfo_width(), 50)
-        ch = max(self.canvas.winfo_height(), 50)
-        scale = min(cw / img.width, ch / img.height, 1.0)
-        disp = img.resize((int(img.width * scale), int(img.height * scale)),
-                          Image.LANCZOS)
-        self._tk_img = ImageTk.PhotoImage(disp)
-        self.canvas.create_image(cw // 2, ch // 2, image=self._tk_img)
+        if str(path).lower().endswith(".gif") and Path(path).exists() \
+                and self._play_gif(path):
+            self.info_var.set(f"{params['model']}  ·  animated GIF  ·  "
+                              f"seed {params['seed']}")
+            return
+        self._draw_frame(img)
         self.info_var.set(f"{params['model'].split('.')[0]}  ·  "
                           f"{img.width}×{img.height}  ·  seed {params['seed']}")
 
@@ -2286,6 +2394,7 @@ class App:
         self.current = len(self.session) - 1 if self.session else None
         self._rebuild_gallery()
         self._show_current()
+        self._update_editor_btn()
         self.status_var.set(f"Deleted {Path(path).name} — "
                             f"{len(self.session)} image(s) left in history.")
 
@@ -2300,6 +2409,7 @@ class App:
             child.destroy()
         self.gallery_canvas.xview_moveto(0.0)
         self._show_current()
+        self._update_editor_btn()
         self.status_var.set("History cleared — saved images remain in the "
                             "output folder.")
 
@@ -2356,12 +2466,16 @@ class App:
     def _save_as(self):
         if self.current is None:
             return
-        img, params, _ = self.session[self.current]
+        _img, params, src = self.session[self.current]
+        is_gif = str(src).lower().endswith(".gif")
+        ext = ".gif" if is_gif else ".png"
+        ftypes = [("GIF animation", "*.gif")] if is_gif \
+            else [("PNG image", "*.png")]
         path = filedialog.asksaveasfilename(
-            defaultextension=".png", filetypes=[("PNG image", "*.png")],
-            initialfile=f"comic_seed{params['seed']}.png")
+            defaultextension=ext, filetypes=ftypes,
+            initialfile=f"comic_seed{params['seed']}{ext}")
         if path:
-            shutil.copy2(self.session[self.current][2], path)
+            shutil.copy2(src, path)
             self.status_var.set(f"Saved to {path}")
 
     # -------------------------------------------------- border maker
@@ -2374,9 +2488,7 @@ class App:
                                 "— a short theme ('haunted forest, gnarled "
                                 "branches') or a full precise prompt.")
             return
-        if self.busy:
-            messagebox.showinfo("Busy", "Wait for the current generation "
-                                "to finish.")
+        if self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -2470,7 +2582,8 @@ class App:
             try:
                 download_model_update(
                     dict(e, size=0),
-                    lambda s: self.ui_queue.put(("status", s)))
+                    lambda s: self.ui_queue.put(("status", s)),
+                    lambda d, t: self.ui_queue.put(("progress", d, t)))
             except Exception as ex:
                 self.ui_queue.put(("error", f"download failed: {ex}"))
                 return
@@ -2610,9 +2723,7 @@ class App:
         self._schedule_persist()
 
     def _generate_animation(self):
-        if self.busy:
-            messagebox.showinfo("Busy", "Wait for the current generation "
-                                        "to finish.")
+        if self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -2644,6 +2755,7 @@ class App:
                  keep_every=ANIM_KEEP.get(self.anim_keep_var.get(), 2),
                  loop=self.anim_loop_var.get(),
                  transparent=self.anim_transparent_var.get(),
+                 gif=self.anim_gif_var.get(),
                  zip=self.anim_zip_var.get(), seed=seed)
         self.busy = True
         self.go_btn.state(["disabled"])
@@ -2666,33 +2778,28 @@ class App:
                       height=p["h"], length=p["length"], seed=p["seed"])
             graph = build_wan_flf_graph(gp) if p.get("seamless") \
                 else build_wan_graph(gp)
-            r = requests.post(f"{ENGINE_URL}/prompt",
-                              json={"prompt": graph}, timeout=30)
-            if r.status_code == 400:
-                raise RuntimeError("engine rejected the animation "
-                                   "workflow — try again after the "
-                                   "engine restarts")
-            r.raise_for_status()
-            pid = r.json()["prompt_id"]
-            status(f"Animating {p['length']} frames — takes a few "
-                   "minutes…")
-            t0 = time.time()
-            metas = None
-            while time.time() - t0 < 1800:
-                time.sleep(4)
-                h = requests.get(f"{ENGINE_URL}/history/{pid}",
-                                 timeout=15).json()
-                if pid in h:
-                    st = h[pid].get("status", {})
-                    if st.get("status_str") == "error":
-                        raise RuntimeError("engine error during "
-                                           "animation — see engine.log")
-                    if h[pid].get("outputs"):
-                        metas = [i for o in h[pid]["outputs"].values()
-                                 for i in o.get("images", [])]
-                        break
+            import websocket
+            ws = websocket.WebSocket()
+            ws.connect(f"ws://{ENGINE_HOST}:{ENGINE_PORT}/ws"
+                       f"?clientId={gen.client_id}", timeout=30)
+            try:
+                r = requests.post(f"{ENGINE_URL}/prompt",
+                                  json={"prompt": graph,
+                                        "client_id": gen.client_id},
+                                  timeout=30)
+                if r.status_code == 400:
+                    raise RuntimeError("engine rejected the animation "
+                                       "workflow — try again after the "
+                                       "engine restarts")
+                r.raise_for_status()
+                pid = r.json()["prompt_id"]
+                status(f"Animating {p['length']} frames — takes a few "
+                       "minutes…")
+                metas = gen._await_images(ws, pid, timeout=2400)  # live %
+            finally:
+                ws.close()
             if not metas:
-                raise RuntimeError("animation timed out")
+                raise RuntimeError("animation produced no frames")
             status(f"Fetching {len(metas)} frames…")
             frames = [gen._fetch_image(m) for m in metas]
             if p.get("seamless") and len(frames) > 2:
@@ -2721,19 +2828,23 @@ class App:
                 for i, f in enumerate(kept):
                     f.save(frames_dir / f"frame_{i:03d}.png")
 
-            looped = kept if p.get("seamless") \
-                else apply_loop(kept, p["loop"])
-            fps_out = p.get("base_fps", 24) / p["keep_every"]
-            gif_path = out_dir / "animation.gif"
-            save_gif(looped, gif_path, fps_out, p["transparent"])
+            result_path = frames_dir / "frame_000.png"
+            if p.get("gif", True):
+                looped = kept if p.get("seamless") \
+                    else apply_loop(kept, p["loop"])
+                fps_out = p.get("base_fps", 24) / p["keep_every"]
+                result_path = out_dir / "animation.gif"
+                save_gif(looped, result_path, fps_out, p["transparent"])
             if p["zip"]:
                 shutil.make_archive(str(out_dir), "zip", out_dir)
             self.ui_queue.put(("finished_image", kept[0].copy(),
                               dict(model="animator", seed=p["seed"]),
-                              gif_path))
-            status(f"Animation done: {len(kept)} frames + GIF in "
-                   f"{out_dir.name}"
-                   + (" (+zip)" if p["zip"] else "") + ".")
+                              result_path))
+            status(f"Animation done: {len(kept)} frames"
+                   + (" + GIF" if p.get("gif", True) else "")
+                   + f" in {out_dir.name}"
+                   + (" (+zip)" if p["zip"] else "")
+                   + ". Select it in the gallery to watch it play.")
             self.ui_queue.put(("done", None))
         except Exception as e:
             self.ui_queue.put(("error", f"animation: {e}"))

@@ -1,5 +1,20 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.1 — 2026-08-07
+- Progress everywhere, with percentages: Setup shows one overall bar +
+  percent across the entire installation (runtime, packages, engine,
+  every model byte); the app's generate bar shows percent and now also
+  covers animations (which previously ran silently) and in-app model
+  downloads.
+- Clicking any Generate while a job runs now offers to cancel it —
+  long animation jobs can no longer lock the app with no way out.
+- "Make GIF" is now a checkbox in the Animator; generated GIFs land in
+  the history, PLAY animated in the preview when selected, and Save As
+  saves the .gif.
+- New "Use selected" button in the Image editor: one click points the
+  editor at the currently selected history image (label shows
+  "selection"); greyed out while the history is empty.
+
 ## v1.7.0 — 2026-08-07
 - True seamless loops: new "Seamless (generated loop)" mode — the
   animation is generated to start AND end on the character's exact pose
