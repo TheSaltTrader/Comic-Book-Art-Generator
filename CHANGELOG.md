@@ -1,5 +1,10 @@
 # Changelog — Comic Book Art Creator
 
+## v1.3.4 — 2026-08-07
+- "🗑 Delete image" button: permanently deletes the selected image from
+  disk and the history strip (with confirm) — generate variations, keep
+  only the one you want.
+
 ## v1.3.3 — 2026-08-07
 - GPU compatibility check: the app detects your NVIDIA card's VRAM at
   startup. Models that fit show green in the model dropdowns; models

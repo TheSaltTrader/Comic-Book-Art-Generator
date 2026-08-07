@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1198,6 +1198,8 @@ class App:
 
         brow = ttk.Frame(right); brow.grid(row=1, column=0, sticky=NSEW, pady=(8, 4))
         ttk.Button(brow, text="💾 Save As…", command=self._save_as).pack(side="left")
+        ttk.Button(brow, text="🗑 Delete image",
+                   command=self._delete_current).pack(side="left", padx=6)
         ttk.Button(brow, text="📁 Open output folder",
                    command=lambda: os.startfile(OUTPUT)).pack(side="left", padx=6)
         ttk.Button(brow, text="⬇ Get LoRAs (CivitAI)",
@@ -1930,6 +1932,39 @@ class App:
         # keep the newest thumbnail in view
         self.gallery.update_idletasks()
         self.gallery_canvas.xview_moveto(1.0)
+
+    def _rebuild_gallery(self):
+        for child in self.gallery.winfo_children():
+            child.destroy()
+        for idx in range(len(self.session)):
+            self._add_thumb(idx)
+        if not self.session:
+            self.gallery_canvas.xview_moveto(0.0)
+
+    def _delete_current(self):
+        """Delete the selected image from disk and the history strip —
+        keep only the results worth keeping."""
+        if self.current is None or not self.session:
+            self.status_var.set("Select an image in the gallery first.")
+            return
+        _img, _params, path = self.session[self.current]
+        if not messagebox.askyesno(
+                "Delete image",
+                f"Permanently delete {Path(path).name} from disk?"):
+            return
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.status_var.set(f"Could not delete {Path(path).name}: {e}")
+            return
+        del self.session[self.current]
+        self.current = len(self.session) - 1 if self.session else None
+        self._rebuild_gallery()
+        self._show_current()
+        self.status_var.set(f"Deleted {Path(path).name} — "
+                            f"{len(self.session)} image(s) left in history.")
 
     def _clear_history(self):
         """Empty the session gallery. Files already saved in output\\ are
