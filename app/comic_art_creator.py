@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -607,7 +607,6 @@ def build_graph(p):
         g["14"] = {"class_type": "SetLatentNoiseMask",
                    "inputs": {"samples": ["5", 0], "mask": ["13", 0]}}
         latent_ref = ["14", 0]
-        denoise = p.get("border_denoise", 1.0)
     elif p.get("ref_image_name"):
         # img2img: reference image -> scale to canvas -> encode to latent
         g["10"] = {"class_type": "LoadImage",
@@ -678,26 +677,13 @@ BORDER_SIZES = {
 BORDER_NEGATIVE = ("text, letters, words, numbers, writing, typography, "
                    "logo, watermark, signature, caption, label, subtitles")
 
-BORDER_TEMPLATES = {
-    "Franchise (game / movie / comic)":
-        "epic decorative border frame themed after {theme}, filled with "
-        "iconic visual motifs, props, character silhouettes, colors and "
-        "symbols of {theme}, richly detailed frame covering all four edges "
-        "and corners of the image, themed corner ornaments, completely "
-        "textless artwork with no lettering or logos, plain empty solid "
-        "dark center panel, high detail",
-    "Arcade cabinet bezel":
-        "vibrant airbrushed bezel border art themed after {theme}, dynamic "
-        "action motifs and characters of {theme} woven around the frame, "
-        "detailed border filling all four edges and corners of the image, "
-        "completely textless artwork with no lettering or logos, plain "
-        "empty solid dark center panel, high detail",
-    "Material / concept":
-        "{theme}, ornate decorative border frame design, richly detailed "
-        "frame filling all four edges and corners of the image, themed "
-        "corner ornaments, completely textless artwork with no lettering, "
-        "plain empty solid dark center panel, high detail",
-}
+BORDER_TEMPLATE = (
+    "epic decorative border frame themed after {theme}, filled with "
+    "iconic visual motifs, props, character silhouettes, colors and "
+    "symbols of {theme}, richly detailed frame covering all four edges "
+    "and corners of the image, themed corner ornaments, completely "
+    "textless artwork with no lettering or logos, plain empty solid "
+    "dark center panel, high detail")
 
 
 BEZEL_POSITIONS = {
@@ -947,7 +933,6 @@ class App:
         self.vram_gb = gpu_vram_gb()   # None = no NVIDIA GPU detected
         self._model_fits = {}      # raw name -> fits in VRAM
         self._last_fit_display = ""
-        self._last_fit_border = ""
 
         self._build_ui()
         self._apply_ui_state(self.settings.get("ui", {}))
@@ -1235,25 +1220,11 @@ class App:
                                    "(uncheck to use your prompt verbatim)",
                         variable=self.border_auto_var).grid(
             row=r, sticky=W, pady=(0, 4)); r += 1
-        bsrow = ttk.Frame(left); bsrow.grid(row=r, sticky=NSEW, pady=2); r += 1
-        ttk.Label(bsrow, text="Style", style="Dim.TLabel").grid(row=0,
-                                                                column=0)
-        self.border_style_var = StringVar(value=list(BORDER_TEMPLATES)[0])
-        ttk.Combobox(bsrow, textvariable=self.border_style_var,
-                     state="readonly", exportselection=False,
-                     values=list(BORDER_TEMPLATES),
-                     width=34).grid(row=0, column=1, padx=(4, 0), sticky=W)
-        bmrow = ttk.Frame(left); bmrow.grid(row=r, sticky=NSEW, pady=2); r += 1
-        bmrow.columnconfigure(1, weight=1)
-        ttk.Label(bmrow, text="Model", style="Dim.TLabel").grid(row=0,
-                                                                column=0)
-        self.border_model_var = StringVar()
-        self.border_model_dd = ttk.Combobox(bmrow,
-                                            textvariable=self.border_model_var,
-                                            state="readonly", exportselection=False)
-        self.border_model_dd.grid(row=0, column=1, padx=(4, 0), sticky="ew")
-        self.border_model_dd.bind("<<ComboboxSelected>>",
-                                  lambda _e: self._on_border_model_pick())
+        ttk.Label(left, text="Uses the settings above: model, LoRAs, "
+                             "Variations, Steps, Seed and Editor all come "
+                             "from the main controls.",
+                  style="Dim.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W); r += 1
         barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(barow, text="Aspect", style="Dim.TLabel").grid(row=0,
                                                                  column=0)
@@ -1261,13 +1232,7 @@ class App:
         ttk.Combobox(barow, textvariable=self.border_aspect_var,
                      state="readonly", exportselection=False,
                      values=list(BORDER_SIZES),
-                     width=26).grid(row=0, column=1, padx=(4, 8), sticky=W)
-        ttk.Label(barow, text="Variations", style="Dim.TLabel").grid(row=0,
-                                                                     column=2)
-        self.border_count_var = IntVar(value=1)
-        ttk.Spinbox(barow, from_=1, to=10, textvariable=self.border_count_var,
-                    exportselection=False,
-                    width=4).grid(row=0, column=3, padx=(4, 0))
+                     width=30).grid(row=0, column=1, padx=(4, 0), sticky=W)
         brefrow = ttk.Frame(left); brefrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         brefrow.columnconfigure(1, weight=1)
         ttk.Button(brefrow, text="🖼 Refs…", width=8,
@@ -1382,10 +1347,6 @@ class App:
             "border_auto": self.border_auto_var.get(),
             "border_aspect": self.border_aspect_var.get(),
             "border_thick": int(self.border_thick_var.get()),
-            "border_style": self.border_style_var.get(),
-            "border_model": self._model_display.get(
-                self.border_model_var.get(), self.border_model_var.get()),
-            "border_count": self.border_count_var.get(),
             "size": self.size_var.get(),
             "steps": self.steps_var.get(),
             "batch": self.batch_var.get(),
@@ -1432,11 +1393,6 @@ class App:
             if st.get("border_aspect") in BORDER_SIZES:
                 self.border_aspect_var.set(st["border_aspect"])
             self.border_thick_var.set(st.get("border_thick", 14))
-            if st.get("border_style") in BORDER_TEMPLATES:
-                self.border_style_var.set(st["border_style"])
-            if st.get("border_model"):
-                self.border_model_var.set(st["border_model"])
-            self.border_count_var.set(st.get("border_count", 1))
             if st.get("size") in SIZE_PRESETS:
                 self.size_var.set(st["size"])
             self.steps_var.set(st.get("steps", "auto"))
@@ -1460,8 +1416,7 @@ class App:
                     self.transparent_var, self.random_seed_var,
                     self.lora_strength, self.change_var, self.editor_var,
                     self.border_auto_var, self.border_aspect_var,
-                    self.border_thick_var, self.border_style_var,
-                    self.border_model_var, self.border_count_var):
+                    self.border_thick_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box):
@@ -1649,16 +1604,6 @@ class App:
         self._update_model_entry_style()
         self._refresh_preset_list()
 
-    def _on_border_model_pick(self):
-        raw = self._model_display.get(self.border_model_var.get(),
-                                      self.border_model_var.get())
-        if not self._model_fits.get(raw, True):
-            self._vram_block_msg(raw)
-            if self._last_fit_border:
-                self.border_model_var.set(self._last_fit_border)
-        else:
-            self._last_fit_border = self.border_model_var.get()
-
     def _use_example(self):
         p = self._preset()
         if not p:
@@ -1716,10 +1661,8 @@ class App:
                 disp += "  — exceeds GPU memory"
             self._model_display[disp] = name
         self.model_dd["values"] = list(self._model_display)
-        self.border_model_dd["values"] = list(self._model_display)
-        for dd in (self.model_dd, self.border_model_dd):
-            dd.configure(postcommand=lambda d=dd:
-                         self._color_model_dropdown(d))
+        self.model_dd.configure(
+            postcommand=lambda: self._color_model_dropdown(self.model_dd))
         if not ckpts:
             self.status_var.set(
                 "No models installed — run Setup.exe (or drop .safetensors "
@@ -1748,17 +1691,6 @@ class App:
                     self._last_fit_display = disp
                 break
         self._update_model_entry_style()
-        # border model is fully independent: only default it when empty or
-        # its file is gone — never because the main model changed
-        bcur = self._model_display.get(self.border_model_var.get(),
-                                       self.border_model_var.get())
-        if not bcur or bcur not in ckpts:
-            bcur = cur
-        for disp, raw in self._model_display.items():
-            if raw == bcur:
-                self.border_model_var.set(disp)
-                break
-
         self._refresh_preset_list()
 
         loras = list_loras()
@@ -2169,13 +2101,8 @@ class App:
         w, h = BORDER_SIZES[self.border_aspect_var.get()]
         refs = list(self.border_ref_paths)
         editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
-        if self.border_auto_var.get():
-            template = BORDER_TEMPLATES.get(
-                self.border_style_var.get(),
-                list(BORDER_TEMPLATES.values())[-1])
-            base = template.format(theme=theme)
-        else:
-            base = theme  # user's prompt, verbatim
+        base = BORDER_TEMPLATE.format(theme=theme) \
+            if self.border_auto_var.get() else theme
         if refs:
             # references go through the image editor: it redraws them as
             # the border, carrying over style, characters and composition
@@ -2185,10 +2112,13 @@ class App:
             model = f"editor:{editor}"
             loras = []
         else:
+            # mimic the main generation settings: model + LoRAs
             prompt = base
-            model = self._model_display.get(self.border_model_var.get(),
-                                            self.border_model_var.get()) \
-                or self._model_raw()
+            model = self._model_raw()
+            if not model:
+                messagebox.showerror("Model", "No model selected in the "
+                                              "main controls.")
+                return
             if not self._model_fits.get(model, True):
                 self._vram_block_msg(model)
                 return
@@ -2196,12 +2126,13 @@ class App:
             loras = [(n, strength) for n in self._selected_loras()]
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
+        steps = None if self.steps_var.get() == "auto" \
+            else int(self.steps_var.get())
         params = dict(
-            prompt=prompt, user_prompt=theme,
-            style=f"border frame — {self.border_style_var.get()}",
+            prompt=prompt, user_prompt=theme, style="border frame",
             negative=BORDER_NEGATIVE, model=model, loras=loras,
-            width=w, height=h, seed=seed, steps=None, cfg=None,
-            batch=max(1, min(10, self.border_count_var.get())),
+            width=w, height=h, seed=seed, steps=steps, cfg=None,
+            batch=max(1, min(10, self.batch_var.get())),
             random_seed=self.random_seed_var.get(),
             transparent=False, preset="border maker",
             border_cut=int(self.border_thick_var.get()),

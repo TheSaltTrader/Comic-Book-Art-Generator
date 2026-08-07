@@ -1,5 +1,14 @@
 # Changelog — Comic Book Art Creator
 
+## v1.5.1 — 2026-08-07
+- Border maker simplified: the Style selector and the section's own
+  Model/Variations controls are removed — borders now mimic the main
+  generation settings (model, LoRAs, Variations, Steps, Seed, Editor).
+  The section only sets border prompt, aspect, thickness and references.
+- Full validation pass: main generation (3 model families), prompt-only
+  masked borders, and border-from-reference via the editor all
+  regression-tested.
+
 ## v1.5.0 — 2026-08-07
 - Border references now use the image editor (same engines and logic as
   the Image Editor section): the reference is shaped to the border canvas

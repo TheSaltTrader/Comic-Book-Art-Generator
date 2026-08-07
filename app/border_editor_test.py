@@ -20,9 +20,8 @@ class Q:
 
 q = Q()
 gen = cac.Generator(q)
-template = cac.BORDER_TEMPLATES["Franchise (game / movie / comic)"]
 params = dict(
-    prompt="redraw this image as " + template.format(
+    prompt="redraw this image as " + cac.BORDER_TEMPLATE.format(
         theme="anime spirit detectives with glowing energy"),
     user_prompt="test", style="border frame", negative=cac.BORDER_NEGATIVE,
     model="editor:kontext", loras=[], width=1280, height=720, seed=99,
