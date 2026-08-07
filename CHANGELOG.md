@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.5.0 — 2026-08-07
+- Border references now use the image editor (same engines and logic as
+  the Image Editor section): the reference is shaped to the border canvas
+  and redrawn as the frame — style, characters and composition carry
+  over. The old img2img seeding for border refs is removed, along with
+  its influence slider. Prompt-only borders keep masked generation.
+
 ## v1.4.1 — 2026-08-07
 - Setup now recalculates its numbers live from the model manifest: full
   model-pack size, how many GB are still to download on this machine, and

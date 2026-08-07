@@ -35,6 +35,9 @@ The **Border maker** (bottom of the left panel) generates themed 4:3/16:9
 frames with a transparent screen hole — pick a style (Franchise, Arcade
 bezel, Material), a model, thickness, and 1–10 variations. Masked
 generation keeps the center empty; prompts are text-free by design.
+Load **reference images** in the border section and they go through the
+Image editor instead: the reference is redrawn as the frame, carrying
+over its style, characters and composition.
 
 The **🧩 Bezel composer** (button under the preview) finishes the job the
 way real arcade bezels are made: load a border (a `border_*.png` you

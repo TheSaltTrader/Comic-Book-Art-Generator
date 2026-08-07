@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -795,20 +795,23 @@ class Generator:
         import websocket  # websocket-client
         if params.get("ref_images"):
             # instruction editing: the images are context for the prompt
-            params["edit_image_names"] = [self._upload_ref(rp)
-                                          for rp in params["ref_images"]]
-        if params.get("border_cut"):
+            if params.get("ref_collage_size"):
+                # border mode: shape the refs to the border canvas so the
+                # editor's output keeps the requested aspect
+                w0, h0 = params["ref_collage_size"]
+                collage = make_collage(params["ref_images"], w0, h0)
+                params["edit_image_names"] = [
+                    self._upload_pil(collage, "cbac_border_ref.png")]
+            else:
+                params["edit_image_names"] = [self._upload_ref(rp)
+                                              for rp in params["ref_images"]]
+        if params.get("border_cut") and not params.get("edit_image_names"):
+            # prompt-only borders: masked generation keeps the center empty
             w, h = params["width"], params["height"]
             # mask is slightly wider than the final cut so the art runs
             # past the transparency line instead of stopping at it
             inner = int(min(w, h) * min(45, params["border_cut"] + 5) / 100)
-            if params.get("border_refs"):
-                # reference images seed the border zone; the preserved
-                # center is painted black so it stays empty either way
-                bg = make_collage(params["border_refs"], w, h)
-                params["border_denoise"] = params.get("denoise", 0.7)
-            else:
-                bg = Image.new("RGB", (w, h), (8, 8, 10))
+            bg = Image.new("RGB", (w, h), (8, 8, 10))
             ImageDraw.Draw(bg).rectangle(
                 (inner, inner, w - inner, h - inner), fill=(8, 8, 10))
             mask = Image.new("RGB", (w, h), (255, 255, 255))
@@ -1275,17 +1278,11 @@ class App:
                                                            sticky=W, padx=6)
         ttk.Button(brefrow, text="✕", width=3,
                    command=self._clear_border_refs).grid(row=0, column=2)
-        birow = ttk.Frame(left); birow.grid(row=r, sticky=NSEW, pady=(0, 2)); r += 1
-        ttk.Label(birow, text="Ref influence",
-                  style="Dim.TLabel").pack(side="left")
-        ttk.Scale(birow, from_=10, to=95, variable=self.change_var,
-                  length=150).pack(side="left", padx=6)
-        self.change_lab = ttk.Label(birow, text="60%", width=5,
-                                    style="Dim.TLabel")
-        self.change_lab.pack(side="left")
-        self.change_var.trace_add(
-            "write", lambda *_a: self.change_lab.config(
-                text=f"{int(self.change_var.get())}%"))
+        ttk.Label(left, text="Refs use the Image editor above: they are "
+                             "redrawn as the border (style, characters and "
+                             "composition carry over).",
+                  style="Dim.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W); r += 1
         btrow = ttk.Frame(left); btrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(btrow, text="Thickness", style="Dim.TLabel").pack(side="left")
         self.border_thick_var = DoubleVar(value=14)
@@ -1838,32 +1835,7 @@ class App:
         editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
         model = self._model_raw()
         if editing:
-            need = 16 if editor == "kontext" else 24
-            if self.vram_gb is not None and self.vram_gb < need:
-                messagebox.showwarning(
-                    "Not enough GPU memory",
-                    f"This editor needs about {need} GB of VRAM — your "
-                    f"card has {self.vram_gb:.1f} GB.")
-                return
-            missing = self._editor_missing(editor)
-            if missing:
-                gb = "12" if editor == "kontext" else "28"
-                if messagebox.askyesno(
-                        "Install editor",
-                        f"The image editor needs {len(missing)} model "
-                        f"file(s) (~{gb} GB) that aren't installed yet."
-                        "\n\nDownload now? Watch the status bar; hit "
-                        "Generate again when it says done."):
-                    threading.Thread(target=self._install_editor,
-                                     args=(editor, missing),
-                                     daemon=True).start()
-                return
-            if not self._engine_knows_editor(editor):
-                self.status_var.set("Restarting engine to load the editor "
-                                    "files — wait for 'Engine ready.', "
-                                    "then Generate again.")
-                threading.Thread(target=self._restart_engine,
-                                 daemon=True).start()
+            if not self._ensure_editor_ready(editor):
                 return
             model = f"editor:{editor}"
         else:
@@ -2195,34 +2167,46 @@ class App:
             messagebox.showerror("Engine", "Engine is not running yet.")
             return
         w, h = BORDER_SIZES[self.border_aspect_var.get()]
+        refs = list(self.border_ref_paths)
+        editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
         if self.border_auto_var.get():
             template = BORDER_TEMPLATES.get(
                 self.border_style_var.get(),
                 list(BORDER_TEMPLATES.values())[-1])
-            prompt = template.format(theme=theme)
+            base = template.format(theme=theme)
         else:
-            prompt = theme  # user's prompt, verbatim
-        model = self._model_display.get(self.border_model_var.get(),
-                                        self.border_model_var.get()) \
-            or self._model_raw()
-        if not self._model_fits.get(model, True):
-            self._vram_block_msg(model)
-            return
+            base = theme  # user's prompt, verbatim
+        if refs:
+            # references go through the image editor: it redraws them as
+            # the border, carrying over style, characters and composition
+            if not self._ensure_editor_ready(editor):
+                return
+            prompt = "redraw this image as " + base
+            model = f"editor:{editor}"
+            loras = []
+        else:
+            prompt = base
+            model = self._model_display.get(self.border_model_var.get(),
+                                            self.border_model_var.get()) \
+                or self._model_raw()
+            if not self._model_fits.get(model, True):
+                self._vram_block_msg(model)
+                return
+            strength = round(self.lora_strength.get(), 2)
+            loras = [(n, strength) for n in self._selected_loras()]
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
-        strength = round(self.lora_strength.get(), 2)
         params = dict(
             prompt=prompt, user_prompt=theme,
             style=f"border frame — {self.border_style_var.get()}",
-            negative=BORDER_NEGATIVE, model=model,
-            loras=[(n, strength) for n in self._selected_loras()],
+            negative=BORDER_NEGATIVE, model=model, loras=loras,
             width=w, height=h, seed=seed, steps=None, cfg=None,
             batch=max(1, min(10, self.border_count_var.get())),
             random_seed=self.random_seed_var.get(),
             transparent=False, preset="border maker",
             border_cut=int(self.border_thick_var.get()),
-            border_refs=list(self.border_ref_paths),
-            denoise=round(self.change_var.get() / 100, 2))
+            ref_images=refs, editor=editor,
+            ref_collage_size=(w, h) if refs else None)
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
@@ -2268,6 +2252,38 @@ class App:
                 return
         self.ui_queue.put(("status", "Editor installed — hit Generate "
                                      "again."))
+
+    def _ensure_editor_ready(self, editor):
+        """True when the editor can run now; otherwise guides the user
+        (VRAM block, download offer, engine restart) and returns False."""
+        need = 16 if editor == "kontext" else 24
+        if self.vram_gb is not None and self.vram_gb < need:
+            messagebox.showwarning(
+                "Not enough GPU memory",
+                f"This editor needs about {need} GB of VRAM — your "
+                f"card has {self.vram_gb:.1f} GB.")
+            return False
+        missing = self._editor_missing(editor)
+        if missing:
+            gb = "12" if editor == "kontext" else "28"
+            if messagebox.askyesno(
+                    "Install editor",
+                    f"The image editor needs {len(missing)} model "
+                    f"file(s) (~{gb} GB) that aren't installed yet."
+                    "\n\nDownload now? Watch the status bar; hit "
+                    "Generate again when it says done."):
+                threading.Thread(target=self._install_editor,
+                                 args=(editor, missing),
+                                 daemon=True).start()
+            return False
+        if not self._engine_knows_editor(editor):
+            self.status_var.set("Restarting engine to load the editor "
+                                "files — wait for 'Engine ready.', "
+                                "then Generate again.")
+            threading.Thread(target=self._restart_engine,
+                             daemon=True).start()
+            return False
+        return True
 
     def _engine_knows_editor(self, engine):
         try:
