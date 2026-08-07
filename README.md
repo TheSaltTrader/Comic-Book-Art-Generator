@@ -90,6 +90,18 @@ page URL (free API key from civitai.com → Account Settings → API Keys;
 stored encrypted). Or drop `.safetensors` files into `models\loras` and
 hit **↻**.
 
+## Reference images — three modes
+
+Load one or more reference images and pick how the AI uses them:
+
+- **Redraw composition** (all models): classic img2img — keeps the
+  reference's layout; "Change amount" sets how far it strays.
+- **Copy the style** (SDXL models): paints whatever your prompt describes
+  in the reference's art style — new composition, borrowed look.
+- **Use the character** (SDXL models): learns the reference's subject and
+  puts them in any scene your prompt describes — redraw them, repose
+  them, relocate them.
+
 ## Transparency
 
 Tick **Transparent BG** for a clean transparent PNG of the subject —

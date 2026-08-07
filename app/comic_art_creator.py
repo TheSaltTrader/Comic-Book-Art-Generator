@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -175,7 +175,9 @@ def start_engine():
         "  checkpoints: checkpoints\n"
         "  loras: loras\n"
         "  vae: vae\n"
-        "  upscale_models: upscale_models\n", encoding="utf-8")
+        "  upscale_models: upscale_models\n"
+        "  ipadapter: ipadapter\n"
+        "  clip_vision: clip_vision\n", encoding="utf-8")
     cmd = [str(engine_python()), "main.py",
            "--listen", ENGINE_HOST, "--port", str(ENGINE_PORT),
            "--extra-model-paths-config", str(EXTRA_PATHS_YAML),
@@ -265,6 +267,7 @@ def download_model_update(entry, status_cb):
     url = (f"https://huggingface.co/{entry['repo']}/resolve/main/"
            f"{entry['remote_file']}")
     dest = MODELS / entry["dir"] / entry["local"]
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
     done, total_mb = 0, entry["size"] / (1024**2)
     with requests.get(url, stream=True, timeout=60) as r:
@@ -276,6 +279,7 @@ def download_model_update(entry, status_cb):
                 if done % (1 << 26) < (1 << 22):  # every ~64 MB
                     status_cb(f"Updating {entry['local']}: "
                               f"{done / (1024**2):.0f}/{total_mb:.0f} MB")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(tmp, dest)
         return True
@@ -350,13 +354,13 @@ def update_engine(new_sha, status_cb):
         new_dir = next(tmp.glob("ComfyUI-*"))
         keep = tmp / "keep"
         keep.mkdir()
-        for sub in ("user", "input"):
+        for sub in ("user", "input", "custom_nodes"):
             s = ENGINE_DIR / sub
             if s.exists():
                 shutil.move(str(s), str(keep / sub))
         shutil.rmtree(ENGINE_DIR)
         shutil.move(str(new_dir), str(ENGINE_DIR))
-        for sub in ("user", "input"):
+        for sub in ("user", "input", "custom_nodes"):
             s = keep / sub
             if s.exists():
                 shutil.move(str(s), str(ENGINE_DIR / sub))
@@ -430,6 +434,34 @@ def build_graph(p):
         g["4"] = {"class_type": "FluxGuidance",
                   "inputs": {"guidance": 3.5, "conditioning": pos_ref}}
         pos_ref = ["4", 0]
+
+    # style reference (IP-Adapter): the refs teach the model a look, the
+    # prompt keeps full control of the composition — SDXL families only
+    if p.get("style_ref_names"):
+        img_ref, nid, bid = None, 31, 41
+        for name in p["style_ref_names"][:6]:
+            g[str(nid)] = {"class_type": "LoadImage",
+                           "inputs": {"image": name}}
+            if img_ref is None:
+                img_ref = [str(nid), 0]
+            else:
+                g[str(bid)] = {"class_type": "ImageBatch",
+                               "inputs": {"image1": img_ref,
+                                          "image2": [str(nid), 0]}}
+                img_ref = [str(bid), 0]
+                bid += 1
+            nid += 1
+        g["50"] = {"class_type": "IPAdapterUnifiedLoader",
+                   "inputs": {"preset": "PLUS (high strength)",
+                              "model": model_ref}}
+        g["51"] = {"class_type": "IPAdapter",
+                   "inputs": {"model": ["50", 0], "ipadapter": ["50", 1],
+                              "image": img_ref,
+                              "weight": p.get("style_weight", 0.8),
+                              "start_at": 0.0, "end_at": 1.0,
+                              "weight_type": p.get("ref_weight_type",
+                                                   "standard")}}
+        model_ref = ["51", 0]
 
     denoise = 1.0
     latent_ref = ["5", 0]
@@ -632,7 +664,13 @@ class Generator:
 
     def _run(self, params):
         import websocket  # websocket-client
-        if params.get("ref_images"):
+        if params.get("ref_images") and \
+                params.get("ref_mode") in ("style", "character"):
+            params["style_ref_names"] = [self._upload_ref(rp)
+                                         for rp in params["ref_images"]]
+            params["ref_weight_type"] = "style transfer" \
+                if params["ref_mode"] == "style" else "standard"
+        elif params.get("ref_images"):
             collage = make_collage(params["ref_images"], params["width"],
                                    params["height"])
             params["ref_image_name"] = self._upload_pil(
@@ -828,6 +866,8 @@ class App:
         s.map("Danger.TButton", background=[("active", "#e74c3c")])
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
+        s.configure("TRadiobutton", background=BG, foreground=FG)
+        s.map("TRadiobutton", background=[("active", BG)])
         s.configure("TCombobox", padding=4)
         s.configure("Horizontal.TProgressbar", background=ACCENT2,
                     troughcolor=BG2)
@@ -1006,6 +1046,16 @@ class App:
                   wraplength=240).grid(row=0, column=1, sticky=W, padx=6)
         ttk.Button(rrow, text="✕", width=3,
                    command=self._clear_ref).grid(row=0, column=2)
+        self.ref_mode_var = StringVar(value="redraw")
+        for val, txt in (
+                ("redraw", "Redraw composition — keeps the image's layout "
+                           "(img2img, all models)"),
+                ("style", "Copy the style — new scene painted in the "
+                          "reference's look (SDXL models)"),
+                ("character", "Use the character — put the reference's "
+                              "subject in new scenes (SDXL models)")):
+            ttk.Radiobutton(left, text=txt, variable=self.ref_mode_var,
+                            value=val).grid(row=r, sticky=W); r += 1
         chrow = ttk.Frame(left); chrow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         ttk.Label(chrow, text="Change amount",
                   style="Dim.TLabel").pack(side="left")
@@ -1177,6 +1227,7 @@ class App:
             "loras": self._selected_loras(),
             "lora_strength": round(self.lora_strength.get(), 2),
             "ref_images": self.ref_paths,
+            "ref_mode": self.ref_mode_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
             "border_theme": self._get(self.border_prompt_box),
@@ -1218,6 +1269,8 @@ class App:
                 first = Path(self.ref_paths[0]).name
                 self.ref_var.set(first if len(self.ref_paths) == 1 else
                                  f"{len(self.ref_paths)} images ({first}, …)")
+            if st.get("ref_mode") in ("redraw", "style", "character"):
+                self.ref_mode_var.set(st["ref_mode"])
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
             if self.border_ref_paths:
@@ -1257,7 +1310,7 @@ class App:
         for var in (self.model_var, self.preset_var, self.size_var,
                     self.steps_var, self.seed_var, self.batch_var,
                     self.transparent_var, self.random_seed_var,
-                    self.lora_strength, self.change_var,
+                    self.lora_strength, self.change_var, self.ref_mode_var,
                     self.border_auto_var, self.border_aspect_var,
                     self.border_thick_var, self.border_style_var,
                     self.border_model_var, self.border_count_var):
@@ -1548,7 +1601,19 @@ class App:
                       transparent=self.transparent_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
+                      ref_mode=self.ref_mode_var.get(),
+                      style_weight=round(self.change_var.get() / 100, 2),
                       denoise=round(self.change_var.get() / 100, 2))
+        if self.ref_paths and self.ref_mode_var.get() in ("style",
+                                                          "character") \
+                and model_family(model) in ("flux", "schnell"):
+            messagebox.showinfo(
+                "Reference mode",
+                "'Copy the style' and 'Use the character' use IP-Adapter, "
+                "which works with SDXL-family models (Juggernaut, "
+                "DreamShaper, Animagine).\nPick one of those — or switch "
+                "to 'Redraw composition' for Flux.")
+            return
 
         self.settings["last_model"] = model
         self._persist()

@@ -1,5 +1,15 @@
 # Changelog — Comic Book Art Creator
 
+## v1.3.0 — 2026-08-07
+- Reference images now have three modes (fixes "the model just repeats
+  the image"): **Redraw composition** (img2img, keeps layout — all
+  models), **Copy the style** (paints new scenes in the reference's look),
+  and **Use the character** (puts the reference's subject in whatever
+  scene the prompt describes). Style/character modes use IP-Adapter and
+  work with SDXL-family models.
+- IP-Adapter node + models added to Setup and the update manifest;
+  engine updates now preserve custom nodes.
+
 ## v1.2.3 — 2026-08-07
 - First-run experience fix (blank model list on fresh PCs): the app now
   detects a missing engine or empty model folder, explains it plainly,

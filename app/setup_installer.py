@@ -182,9 +182,25 @@ def _run_install(skip_models, log, status, progress):
     else:
         log(f"GPU OK: {gpu}")
 
+    # ---- 3b: IP-Adapter custom node (style references) ----
+    node_dir = engine / "custom_nodes" / "ComfyUI_IPAdapter_plus"
+    if not node_dir.exists():
+        status("Installing IP-Adapter node...")
+        with tempfile.TemporaryDirectory(dir=TMP_DIR) as td:
+            z = Path(td) / "ipa.zip"
+            _download("https://github.com/cubiq/ComfyUI_IPAdapter_plus/"
+                      "archive/refs/heads/main.zip", z, "IP-Adapter node",
+                      status, progress)
+            with zipfile.ZipFile(z) as zf:
+                zf.extractall(td)
+            inner = next(Path(td).glob("ComfyUI_IPAdapter_plus-*"))
+            shutil.move(str(inner), str(node_dir))
+        log("IP-Adapter node installed.")
+
     # ---- 4: folders + models ----
     for d in ("models/checkpoints", "models/loras", "models/vae",
-              "models/upscale_models", "models/rembg", "output/_raw"):
+              "models/upscale_models", "models/rembg", "models/ipadapter",
+              "models/clip_vision", "output/_raw"):
         (PROJECT / d).mkdir(parents=True, exist_ok=True)
     if skip_models:
         log("Model pack skipped (engine-only install).")
@@ -206,6 +222,7 @@ def _run_install(skip_models, log, status, progress):
 
 
 def _download(url, dest, label, status, progress):
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     with requests.get(url, stream=True, timeout=60,
                       allow_redirects=True) as r:

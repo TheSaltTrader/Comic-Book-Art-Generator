@@ -10,5 +10,7 @@
   {"repo": "blink7630/graphic-novel-illustration",             "remote_file": "Graphic_Novel_Illustration-000007.safetensors",      "local": "SDXL_GraphicNovel.safetensors",       "dir": "loras"},
   {"repo": "alvdansen/BandW-Manga",                            "remote_file": "BW-000014.safetensors",                              "local": "SDXL_BW_Manga.safetensors",           "dir": "loras"},
   {"repo": "artificialguybr/LineAniRedmond-LinearMangaSDXL-V2","remote_file": "LineAniRedmondV2-Lineart-LineAniAF.safetensors",     "local": "SDXL_LineArt_Manga.safetensors",      "dir": "loras"},
-  {"repo": "Linaqruf/style-enhancer-xl-lora",                  "remote_file": "style-enhancer-xl.safetensors",                      "local": "SDXL_StyleEnhancer_Anime.safetensors", "dir": "loras"}
+  {"repo": "Linaqruf/style-enhancer-xl-lora",                  "remote_file": "style-enhancer-xl.safetensors",                      "local": "SDXL_StyleEnhancer_Anime.safetensors", "dir": "loras"},
+  {"repo": "h94/IP-Adapter",                                   "remote_file": "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors", "local": "ip-adapter-plus_sdxl_vit-h.safetensors", "dir": "ipadapter"},
+  {"repo": "h94/IP-Adapter",                                   "remote_file": "models/image_encoder/model.safetensors",             "local": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors", "dir": "clip_vision"}
 ]
