@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.6.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -541,6 +541,119 @@ def build_qwen_edit_graph(p):
     return g
 
 
+WAN_FILE = "wan2.2_ti2v_5B_fp16.safetensors"
+WAN_TE_FILE = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+WAN_VAE_FILE = "wan2.2_vae.safetensors"
+WAN_NEGATIVE = ("blurry, distorted, deformed, extra limbs, morphing, text, "
+                "watermark, background clutter, scene change, camera "
+                "movement, zoom, pan")
+ANIM_SIZES = {
+    "Square (704x704)": (704, 704),
+    "Landscape (1280x704)": (1280, 704),
+    "Portrait (704x1280)": (704, 1280),
+}
+ANIM_KEEP = {
+    "all frames (24 fps)": 1,
+    "every 2nd (12 fps)": 2,
+    "every 3rd (8 fps)": 3,
+    "every 4th (6 fps)": 4,
+}
+ANIM_LOOPS = ["Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+
+
+def build_wan_graph(p):
+    """Image-to-video via Wan 2.2 5B: the character image animates per
+    the action prompt; every frame comes back as an image."""
+    g = {}
+    g["1"] = {"class_type": "UNETLoader",
+              "inputs": {"unet_name": WAN_FILE, "weight_dtype": "default"}}
+    g["2"] = {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": WAN_TE_FILE, "type": "wan",
+                         "device": "default"}}
+    g["3"] = {"class_type": "VAELoader",
+              "inputs": {"vae_name": WAN_VAE_FILE}}
+    g["4"] = {"class_type": "CLIPTextEncode",
+              "inputs": {"text": p["prompt"], "clip": ["2", 0]}}
+    g["5"] = {"class_type": "CLIPTextEncode",
+              "inputs": {"text": p.get("negative", WAN_NEGATIVE),
+                         "clip": ["2", 0]}}
+    g["6"] = {"class_type": "LoadImage",
+              "inputs": {"image": p["anim_image_name"]}}
+    g["7"] = {"class_type": "Wan22ImageToVideoLatent",
+              "inputs": {"vae": ["3", 0], "width": p["width"],
+                         "height": p["height"], "length": p["length"],
+                         "batch_size": 1, "start_image": ["6", 0]}}
+    g["8"] = {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["4", 0],
+                         "negative": ["5", 0], "latent_image": ["7", 0],
+                         "seed": p["seed"], "steps": 20, "cfg": 5.0,
+                         "sampler_name": "uni_pc", "scheduler": "simple",
+                         "denoise": 1.0}}
+    g["9"] = {"class_type": "VAEDecode",
+              "inputs": {"samples": ["8", 0], "vae": ["3", 0]}}
+    g["10"] = {"class_type": "SaveImage",
+               "inputs": {"filename_prefix": "cbac_anim",
+                          "images": ["9", 0]}}
+    return g
+
+
+_REMBG_DIR_CODE = (
+    "import sys, pathlib; from PIL import Image; "
+    "from rembg import remove, new_session; "
+    "src = pathlib.Path(sys.argv[1]); dst = pathlib.Path(sys.argv[2]); "
+    "s = new_session(sys.argv[3]); "
+    "[remove(Image.open(f).convert('RGBA'), session=s).save(dst / f.name) "
+    "for f in sorted(src.glob('*.png'))]")
+
+
+def remove_background_dir(src_dir, dst_dir):
+    """One rembg session for a whole folder of frames."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    (MODELS / "rembg").mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([str(engine_python()), "-c", _REMBG_DIR_CODE,
+                        str(src_dir), str(dst_dir), "isnet-general-use"],
+                       capture_output=True, text=True, timeout=1800,
+                       creationflags=NO_WINDOW, env=_contained_env())
+    if r.returncode != 0:
+        raise RuntimeError(f"frame background removal failed: "
+                           f"{r.stderr[-400:]}")
+
+
+def apply_loop(frames, mode):
+    if mode.startswith("Ping-pong") and len(frames) > 2:
+        return frames + frames[-2:0:-1]
+    if mode.startswith("Crossfade") and len(frames) > 8:
+        k = min(6, len(frames) // 4)
+        out = list(frames)
+        for i in range(k):
+            t = (i + 1) / (k + 1)
+            idx = len(frames) - k + i
+            out[idx] = Image.blend(frames[idx].convert("RGBA"),
+                                   frames[i].convert("RGBA"), t)
+        return out
+    return list(frames)
+
+
+def save_gif(frames, path, fps, transparent):
+    dur = max(20, int(round(1000 / fps)))
+    if transparent:
+        conv = []
+        for f in frames:
+            rgba = f.convert("RGBA")
+            alpha = rgba.getchannel("A")
+            p_img = rgba.convert("RGB").convert(
+                "P", palette=Image.ADAPTIVE, colors=255)
+            mask = alpha.point(lambda a: 255 if a <= 128 else 0)
+            p_img.paste(255, mask)
+            conv.append(p_img)
+        conv[0].save(path, save_all=True, append_images=conv[1:],
+                     duration=dur, loop=0, disposal=2, transparency=255)
+    else:
+        rgb = [f.convert("RGB") for f in frames]
+        rgb[0].save(path, save_all=True, append_images=rgb[1:],
+                    duration=dur, loop=0)
+
+
 def build_graph(p):
     """Build a ComfyUI prompt graph from generation params dict."""
     if p.get("edit_image_names"):
@@ -944,6 +1057,7 @@ class App:
         self._persist_job = None
         self.ref_paths = []        # img2img reference images
         self.border_ref_paths = []  # border-maker reference images
+        self.anim_image_path = None  # animator character image
         self.vram_gb = gpu_vram_gb()   # None = no NVIDIA GPU detected
         self._model_fits = {}      # raw name -> fits in VRAM
         self._last_fit_display = ""
@@ -1057,10 +1171,20 @@ class App:
             "<Configure>",
             lambda e: self.left_canvas.itemconfigure(left_win, width=e.width))
 
-        def _left_wheel(e):
-            self.left_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
-        self.left_canvas.bind("<MouseWheel>", _left_wheel)
-        left.bind("<MouseWheel>", _left_wheel)
+        def _wheel_router(e):
+            # children swallow wheel events; route them to the panel
+            # whenever the pointer is anywhere inside the left canvas
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+            while w is not None:
+                if w is self.lora_list:
+                    return None      # its own scrollbar handles it
+                if w is self.left_canvas:
+                    self.left_canvas.yview_scroll(
+                        -1 if e.delta > 0 else 1, "units")
+                    return "break"
+                w = w.master
+            return None
+        self.root.bind_all("<MouseWheel>", _wheel_router, add="+")
         left.columnconfigure(0, weight=1)
         r = 0
 
@@ -1283,6 +1407,61 @@ class App:
                    command=self._generate_border).grid(row=r, sticky="ew",
                                                        pady=(4, 8)); r += 1
 
+        # ---------- animator (old-school sprite animation) ----------
+        ttk.Label(left, text="ANIMATOR — animate a character image into "
+                             "sprite frames & GIF", style="Head.TLabel",
+                  wraplength=400, justify="left").grid(
+            row=r, sticky=W, pady=(14, 0)); r += 1
+        arow = ttk.Frame(left); arow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        arow.columnconfigure(1, weight=1)
+        ttk.Button(arow, text="🖼 Character…", width=12,
+                   command=self._pick_anim_image).grid(row=0, column=0)
+        self.anim_img_var = StringVar(value="none")
+        ttk.Label(arow, textvariable=self.anim_img_var, style="Dim.TLabel",
+                  wraplength=180).grid(row=0, column=1, sticky=W, padx=6)
+        ttk.Button(arow, text="Use current", width=11,
+                   command=self._use_current_for_anim).grid(row=0, column=2)
+        ttk.Button(arow, text="✕", width=3,
+                   command=self._clear_anim_image).grid(row=0, column=3,
+                                                        padx=(4, 0))
+        ttk.Label(left, text="Action (what the character does):",
+                  style="Dim.TLabel").grid(row=r, sticky=W); r += 1
+        self.anim_prompt_box = self._text(left, 2)
+        self.anim_prompt_box.grid(row=r, sticky="ew", pady=(2, 4)); r += 1
+        a2 = ttk.Frame(left); a2.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(a2, text="Seconds", style="Dim.TLabel").grid(row=0,
+                                                               column=0)
+        self.anim_secs_var = IntVar(value=2)
+        ttk.Spinbox(a2, from_=1, to=5, textvariable=self.anim_secs_var,
+                    exportselection=False, width=3).grid(row=0, column=1,
+                                                         padx=(4, 10))
+        ttk.Label(a2, text="Keep", style="Dim.TLabel").grid(row=0, column=2)
+        self.anim_keep_var = StringVar(value=list(ANIM_KEEP)[1])
+        ttk.Combobox(a2, textvariable=self.anim_keep_var, state="readonly",
+                     exportselection=False, values=list(ANIM_KEEP),
+                     width=17).grid(row=0, column=3, padx=(4, 0))
+        a3 = ttk.Frame(left); a3.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(a3, text="Loop", style="Dim.TLabel").grid(row=0, column=0)
+        self.anim_loop_var = StringVar(value=ANIM_LOOPS[0])
+        ttk.Combobox(a3, textvariable=self.anim_loop_var, state="readonly",
+                     exportselection=False, values=ANIM_LOOPS,
+                     width=22).grid(row=0, column=1, padx=(4, 10))
+        self.anim_size_var = StringVar(value=list(ANIM_SIZES)[0])
+        ttk.Combobox(a3, textvariable=self.anim_size_var, state="readonly",
+                     exportselection=False, values=list(ANIM_SIZES),
+                     width=18).grid(row=0, column=2)
+        a4 = ttk.Frame(left); a4.grid(row=r, sticky=NSEW, pady=2); r += 1
+        self.anim_transparent_var = BooleanVar(value=True)
+        ttk.Checkbutton(a4, text="Transparent frames",
+                        variable=self.anim_transparent_var).pack(side="left")
+        self.anim_zip_var = BooleanVar(value=True)
+        ttk.Checkbutton(a4, text="Zip the animation folder",
+                        variable=self.anim_zip_var).pack(side="left",
+                                                         padx=(12, 0))
+        ttk.Button(left, text="🎬 Generate animation",
+                   command=self._generate_animation).grid(
+            row=r, sticky="ew", pady=(4, 8)); r += 1
+
         # ---------- right column: preview + gallery ----------
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
         right.grid(row=0, column=1, sticky=NSEW)
@@ -1364,6 +1543,14 @@ class App:
             "editor_canvas": self.editor_canvas_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
+            "anim_image": self.anim_image_path or "",
+            "anim_action": self._get(self.anim_prompt_box),
+            "anim_secs": self.anim_secs_var.get(),
+            "anim_keep": self.anim_keep_var.get(),
+            "anim_loop": self.anim_loop_var.get(),
+            "anim_size": self.anim_size_var.get(),
+            "anim_transparent": self.anim_transparent_var.get(),
+            "anim_zip": self.anim_zip_var.get(),
             "border_theme": self._get(self.border_prompt_box),
             "border_auto": self.border_auto_var.get(),
             "border_aspect": self.border_aspect_var.get(),
@@ -1410,6 +1597,20 @@ class App:
                     first if len(self.border_ref_paths) == 1 else
                     f"{len(self.border_ref_paths)} images ({first}, …)")
             self.change_var.set(st.get("change", 60))
+            ai = st.get("anim_image", "")
+            if ai and Path(ai).exists():
+                self.anim_image_path = ai
+                self.anim_img_var.set(Path(ai).name)
+            self._set(self.anim_prompt_box, st.get("anim_action", ""))
+            self.anim_secs_var.set(st.get("anim_secs", 2))
+            if st.get("anim_keep") in ANIM_KEEP:
+                self.anim_keep_var.set(st["anim_keep"])
+            if st.get("anim_loop") in ANIM_LOOPS:
+                self.anim_loop_var.set(st["anim_loop"])
+            if st.get("anim_size") in ANIM_SIZES:
+                self.anim_size_var.set(st["anim_size"])
+            self.anim_transparent_var.set(st.get("anim_transparent", True))
+            self.anim_zip_var.set(st.get("anim_zip", True))
             self._set(self.border_prompt_box, st.get("border_theme", ""))
             self.border_auto_var.set(st.get("border_auto", True))
             if st.get("border_aspect") in BORDER_SIZES:
@@ -1439,10 +1640,13 @@ class App:
                     self.lora_strength, self.change_var, self.editor_var,
                     self.editor_canvas_var,
                     self.border_auto_var, self.border_aspect_var,
-                    self.border_thick_var):
+                    self.border_thick_var, self.anim_secs_var,
+                    self.anim_keep_var, self.anim_loop_var,
+                    self.anim_size_var, self.anim_transparent_var,
+                    self.anim_zip_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
-                    self.border_prompt_box):
+                    self.border_prompt_box, self.anim_prompt_box):
             box.bind("<KeyRelease>", self._schedule_persist)
             box.bind("<FocusOut>", self._schedule_persist)
 
@@ -2178,7 +2382,12 @@ class App:
         "qwen": [("diffusion_models", QWEN_EDIT_FILE),
                  ("text_encoders", QWEN_TE_FILE),
                  ("vae", QWEN_VAE_FILE)],
+        "wan": [("diffusion_models", WAN_FILE),
+                ("text_encoders", WAN_TE_FILE),
+                ("vae", WAN_VAE_FILE)],
     }
+    EDITOR_UNETS = {"kontext": KONTEXT_FILE, "qwen": QWEN_EDIT_FILE,
+                    "wan": WAN_FILE}
 
     def _editor_missing(self, engine):
         missing = [(d, f) for d, f in self.EDITOR_FILES[engine]
@@ -2247,8 +2456,7 @@ class App:
             unets = _api_choices("UNETLoader", "unet_name")
         except Exception:
             return True   # engine not up yet; boot flow handles that
-        target = KONTEXT_FILE if engine == "kontext" else QWEN_EDIT_FILE
-        return target in unets
+        return self.EDITOR_UNETS.get(engine, KONTEXT_FILE) in unets
 
     # -------------------------------------------------- style add-on
     def _style_support_ok(self):
@@ -2307,6 +2515,151 @@ class App:
                                          "again."))
         except Exception as e:
             self.ui_queue.put(("error", f"IP-Adapter install failed: {e}"))
+
+    # -------------------------------------------------- animator
+    def _pick_anim_image(self):
+        path = filedialog.askopenfilename(filetypes=[
+            ("Images", "*.png;*.jpg;*.jpeg;*.webp"), ("All files", "*.*")])
+        if path:
+            self.anim_image_path = path
+            self.anim_img_var.set(Path(path).name)
+            self._schedule_persist()
+
+    def _use_current_for_anim(self):
+        if self.current is None or not self.session:
+            self.status_var.set("Select an image in the gallery first.")
+            return
+        _img, _params, path = self.session[self.current]
+        self.anim_image_path = str(path)
+        self.anim_img_var.set(Path(path).name)
+        self._schedule_persist()
+
+    def _clear_anim_image(self):
+        self.anim_image_path = None
+        self.anim_img_var.set("none")
+        self._schedule_persist()
+
+    def _generate_animation(self):
+        if self.busy:
+            messagebox.showinfo("Busy", "Wait for the current generation "
+                                        "to finish.")
+            return
+        if not engine_alive():
+            messagebox.showerror("Engine", "Engine is not running yet.")
+            return
+        if not self.anim_image_path or \
+                not Path(self.anim_image_path).exists():
+            messagebox.showinfo("Character", "Load a character image first "
+                                             "(🖼 Character… or Use "
+                                             "current).")
+            return
+        action = self._get(self.anim_prompt_box)
+        if not action:
+            messagebox.showinfo("Action", "Describe the action first — "
+                                          "e.g. 'walk cycle', 'sword "
+                                          "slash', 'idle breathing, cape "
+                                          "swaying'.")
+            return
+        if not self._ensure_editor_ready("wan"):
+            return
+        w, h = ANIM_SIZES[self.anim_size_var.get()]
+        secs = max(1, min(5, self.anim_secs_var.get()))
+        seed = random.randrange(2**32) if self.random_seed_var.get() \
+            else int(self.seed_var.get() or 0)
+        p = dict(image=self.anim_image_path, action=action, w=w, h=h,
+                 length=24 * secs + 1,
+                 keep_every=ANIM_KEEP.get(self.anim_keep_var.get(), 2),
+                 loop=self.anim_loop_var.get(),
+                 transparent=self.anim_transparent_var.get(),
+                 zip=self.anim_zip_var.get(), seed=seed)
+        self.busy = True
+        self.go_btn.state(["disabled"])
+        self.progress["value"] = 0
+        self._persist()
+        threading.Thread(target=self._run_animation, args=(p,),
+                         daemon=True).start()
+
+    def _run_animation(self, p):
+        try:
+            status = lambda s: self.ui_queue.put(("status", s))
+            status("Animating — uploading character…")
+            gen = Generator(self.ui_queue)
+            name = gen._upload_ref(p["image"])
+            prompt = (f"{p['action']}. The character performs the action "
+                      "smoothly in place, full body visible, flat plain "
+                      "solid background, locked camera, no camera "
+                      "movement.")
+            graph = build_wan_graph(dict(
+                prompt=prompt, anim_image_name=name, width=p["w"],
+                height=p["h"], length=p["length"], seed=p["seed"]))
+            r = requests.post(f"{ENGINE_URL}/prompt",
+                              json={"prompt": graph}, timeout=30)
+            if r.status_code == 400:
+                raise RuntimeError("engine rejected the animation "
+                                   "workflow — try again after the "
+                                   "engine restarts")
+            r.raise_for_status()
+            pid = r.json()["prompt_id"]
+            status(f"Animating {p['length']} frames — takes a few "
+                   "minutes…")
+            t0 = time.time()
+            metas = None
+            while time.time() - t0 < 1800:
+                time.sleep(4)
+                h = requests.get(f"{ENGINE_URL}/history/{pid}",
+                                 timeout=15).json()
+                if pid in h:
+                    st = h[pid].get("status", {})
+                    if st.get("status_str") == "error":
+                        raise RuntimeError("engine error during "
+                                           "animation — see engine.log")
+                    if h[pid].get("outputs"):
+                        metas = [i for o in h[pid]["outputs"].values()
+                                 for i in o.get("images", [])]
+                        break
+            if not metas:
+                raise RuntimeError("animation timed out")
+            status(f"Fetching {len(metas)} frames…")
+            frames = [gen._fetch_image(m) for m in metas]
+            kept = frames[::p["keep_every"]]
+
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            slug = re.sub(r"[^a-z0-9]+", "_",
+                          p["action"].lower())[:30].strip("_") or "anim"
+            out_dir = OUTPUT / "animations" / f"{stamp}_{slug}"
+            frames_dir = out_dir / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+
+            if p["transparent"]:
+                status("Removing backgrounds from "
+                       f"{len(kept)} frames…")
+                raw_dir = out_dir / "_raw_frames"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                for i, f in enumerate(kept):
+                    f.save(raw_dir / f"frame_{i:03d}.png")
+                remove_background_dir(raw_dir, frames_dir)
+                kept = [Image.open(fp).convert("RGBA")
+                        for fp in sorted(frames_dir.glob("*.png"))]
+                shutil.rmtree(raw_dir, ignore_errors=True)
+            else:
+                for i, f in enumerate(kept):
+                    f.save(frames_dir / f"frame_{i:03d}.png")
+
+            looped = apply_loop(kept, p["loop"])
+            fps_out = 24 / p["keep_every"]
+            gif_path = out_dir / "animation.gif"
+            save_gif(looped, gif_path, fps_out, p["transparent"])
+            if p["zip"]:
+                shutil.make_archive(str(out_dir), "zip", out_dir)
+            self.ui_queue.put(("finished_image", kept[0].copy(),
+                              dict(model="animator", seed=p["seed"]),
+                              gif_path))
+            status(f"Animation done: {len(kept)} frames + GIF in "
+                   f"{out_dir.name}"
+                   + (" (+zip)" if p["zip"] else "") + ".")
+            self.ui_queue.put(("done", None))
+        except Exception as e:
+            self.ui_queue.put(("error", f"animation: {e}"))
 
     # -------------------------------------------------- training dataset
     def _add_to_training(self):

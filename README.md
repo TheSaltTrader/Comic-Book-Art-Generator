@@ -112,6 +112,18 @@ Editor models download on first use (~12 GB / ~28 GB) after a prompt.
 Edited results land in the gallery like everything else, so you can
 chain edits: edit → select result → send it back in → edit again.
 
+## Animator — sprites & GIFs
+
+Animate any character image (ideally a transparent PNG): describe the
+action ("walk cycle", "sword slash", "idle breathing, cape swaying"),
+pick duration, frames-to-keep and a loop mode, and generate. You get a
+folder of **transparent PNG frames**, a **looping GIF**, and optionally a
+**zip** of the whole animation — ready for old-school sprite work.
+Loop modes: **Ping-pong** plays forward-then-backward for a mathematically
+perfect loop; **Crossfade** blends the ends for organic cycles. One
+generation per action builds a full sprite set (idle / walk / attack…).
+Powered by Wan 2.2 (Apache 2.0); ~18 GB, self-installs on first use.
+
 ## Transparency
 
 Tick **Transparent BG** for a clean transparent PNG of the subject —

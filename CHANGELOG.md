@@ -1,5 +1,15 @@
 # Changelog — Comic Book Art Creator
 
+## v1.6.0 — 2026-08-07
+- ANIMATOR: animate a character image into sprite frames and a GIF
+  (Wan 2.2, Apache 2.0, ~18 GB, self-installs). Pick a character (any
+  image, or the current gallery selection), describe the action, choose
+  duration (1–5 s), frames to keep (24/12/8/6 fps), loop mode
+  (Ping-pong = perfect loop, Crossfade, or none), and canvas. Output:
+  transparent PNG frames folder + looping GIF + optional zip — made for
+  old-school animated sprites.
+- Mouse wheel now scrolls the left panel from anywhere inside it.
+
 ## v1.5.3 — 2026-08-07
 - Border maker defaults to widescreen 16:9 HD (1920x1080). Borders keep
   the exact-canvas-size logic from v1.5.2 (references condition the art,
