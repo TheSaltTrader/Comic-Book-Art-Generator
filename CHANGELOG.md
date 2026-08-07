@@ -1,5 +1,10 @@
 # Changelog — Comic Book Art Creator
 
+## v1.5.3 — 2026-08-07
+- Border maker defaults to widescreen 16:9 HD (1920x1080). Borders keep
+  the exact-canvas-size logic from v1.5.2 (references condition the art,
+  the selected aspect sets the output dimensions).
+
 ## v1.5.2 — 2026-08-07
 - New "Output at canvas size" checkbox in the Image editor: the loaded
   image is used purely as reference while the output is generated at the

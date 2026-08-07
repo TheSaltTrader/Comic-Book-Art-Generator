@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1248,7 +1248,7 @@ class App:
         barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(barow, text="Aspect", style="Dim.TLabel").grid(row=0,
                                                                  column=0)
-        self.border_aspect_var = StringVar(value=list(BORDER_SIZES)[1])
+        self.border_aspect_var = StringVar(value=list(BORDER_SIZES)[2])
         ttk.Combobox(barow, textvariable=self.border_aspect_var,
                      state="readonly", exportselection=False,
                      values=list(BORDER_SIZES),
