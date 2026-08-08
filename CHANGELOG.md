@@ -1,5 +1,16 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.4 — 2026-08-07
+- New default loop mode "Seamless motion (auto-cut)": the clip is
+  generated with free, fluid motion, then automatically cut at its two
+  most similar frames so it loops playing forward — walks and runs loop
+  without ping-pong reversal. Longer durations (3–5 s) give tighter
+  seams. "Seamless in-place (generated)" remains best for capes/idles.
+- Auto-prep on every animation: the character is extracted from its
+  background and staged on neutral gray before animating — fixes frozen
+  or mushy motion from black backgrounds and hard cutouts.
+- Seamless in-place quality: 30 steps / cfg 5.5.
+
 ## v1.7.3 — 2026-08-07
 - Fixes near-static animations ("only the eyes blinked"): seamless mode
   anchors first and last frames to the same pose, and the model would

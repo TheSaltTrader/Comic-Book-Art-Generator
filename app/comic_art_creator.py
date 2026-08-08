@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.7.4"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -564,8 +564,40 @@ ANIM_KEEP = {
     "every 3rd (8 fps)": 3,
     "every 4th (6 fps)": 4,
 }
-ANIM_LOOPS = ["Seamless (generated loop — best)",
+ANIM_LOOPS = ["Seamless motion (auto-cut — walks, runs)",
+              "Seamless in-place (generated — capes, idle)",
               "Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+
+
+def frame_diff(a, b):
+    """Mean pixel difference between two frames (0-255 scale)."""
+    hst = ImageChops.difference(a.convert("RGB"),
+                                b.convert("RGB")).histogram()
+    return sum(hst[i % 256] * (i % 256)
+               for i in range(len(hst))) / (a.width * a.height * 3)
+
+
+def best_loop_cut(frames, min_len=8):
+    """Cut the clip at its most similar frame pair: frames[i:j] then
+    loops forward with a naturally closing seam — fluid motion, no
+    reversal. Ideal for periodic actions like walk cycles."""
+    n = len(frames)
+    if n < min_len + 3:
+        return frames
+    small = [f.convert("L").resize((64, 64)) for f in frames]
+
+    def sdiff(a, b):
+        hst = ImageChops.difference(a, b).histogram()
+        return sum(hst[i] * i for i in range(len(hst))) / (64 * 64)
+
+    best = None
+    for i in range(0, max(1, n // 3)):
+        for j in range(i + min_len, n):
+            d = sdiff(small[i], small[j])
+            if best is None or d < best[0]:
+                best = (d, i, j)
+    _, i, j = best
+    return frames[i:j]
 ANIM_MOTION = {
     "Strong (recommended)":
         "Large, exaggerated, theatrical motion — the whole body moves "
@@ -616,7 +648,8 @@ def build_wan_flf_graph(p):
     g["8"] = {"class_type": "KSampler",
               "inputs": {"model": ["1", 0], "positive": ["7", 0],
                          "negative": ["7", 1], "latent_image": ["7", 2],
-                         "seed": p["seed"], "steps": 20, "cfg": 5.0,
+                         "seed": p["seed"], "steps": p.get("steps") or 30,
+                         "cfg": 5.5,
                          "sampler_name": "uni_pc", "scheduler": "simple",
                          "denoise": 1.0}}
     g["9"] = {"class_type": "VAEDecode",
@@ -2744,7 +2777,7 @@ class App:
                                           "slash', 'idle breathing, cape "
                                           "swaying'.")
             return
-        seamless = self.anim_loop_var.get().startswith("Seamless")
+        seamless = self.anim_loop_var.get().startswith("Seamless in-place")
         if not self._ensure_editor_ready("wanflf" if seamless else "wan"):
             return
         w, h = ANIM_SIZES[self.anim_size_var.get()]
@@ -2773,7 +2806,15 @@ class App:
             status = lambda s: self.ui_queue.put(("status", s))
             status("Animating — uploading character…")
             gen = Generator(ChannelQueue(self.ui_queue, "anim_progress"))
-            name = gen._upload_ref(p["image"])
+            # auto-prep: isolate the character and stage it on neutral
+            # gray — video models animate poorly on black voids/cutouts
+            status("Preparing character (background staging)…")
+            src_img = Image.open(p["image"]).convert("RGBA")
+            cut = remove_background(src_img)
+            stage = Image.new("RGBA", cut.size, (200, 200, 205, 255))
+            stage.alpha_composite(cut)
+            name = gen._upload_pil(stage.convert("RGB"),
+                                   "cbac_anim_prepped.png")
             motion = ANIM_MOTION.get(p.get("motion", ""),
                                      list(ANIM_MOTION.values())[0])
             prompt = (f"{p['action']}. {motion}. The character stays "
@@ -2811,6 +2852,8 @@ class App:
             if p.get("seamless") and len(frames) > 2:
                 frames = frames[:-1]   # last frame == first: drop the dupe
             kept = frames[::p["keep_every"]]
+            if p["loop"].startswith("Seamless motion"):
+                kept = best_loop_cut(kept)
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             slug = re.sub(r"[^a-z0-9]+", "_",
@@ -2837,6 +2880,7 @@ class App:
             result_path = frames_dir / "frame_000.png"
             if p.get("gif", True):
                 looped = kept if p.get("seamless") \
+                    or p["loop"].startswith("Seamless motion") \
                     else apply_loop(kept, p["loop"])
                 fps_out = p.get("base_fps", 24) / p["keep_every"]
                 result_path = out_dir / "animation.gif"
