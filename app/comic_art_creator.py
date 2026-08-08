@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1098,6 +1098,26 @@ class ChannelQueue:
             self.q.put((self.channel,) + tuple(msg[1:]))
         else:
             self.q.put(msg)
+
+
+def make_collage(paths, w, h):
+    """Compose the reference image(s) onto one w x h canvas — a lone ref
+    is letterboxed, several tile in a grid. The editor redraws this
+    canvas, so its aspect drives the output aspect."""
+    canvas = Image.new("RGB", (w, h), (32, 32, 36))
+    n = max(1, len(paths))
+    cols = max(1, min(n, int((n * w / max(1, h)) ** 0.5 + 0.5)))
+    rows = -(-n // cols)
+    cw, ch = w // cols, h // rows
+    for k, p in enumerate(paths):
+        try:
+            img = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        img.thumbnail((cw, ch), Image.LANCZOS)
+        canvas.paste(img, ((k % cols) * cw + (cw - img.width) // 2,
+                           (k // cols) * ch + (ch - img.height) // 2))
+    return canvas
 
 
 class Generator:
@@ -2856,7 +2876,7 @@ class App:
         if refs:
             # references go through the image editor: it redraws them as
             # the border, carrying over style, characters and composition
-            if not self._ensure_editor_ready(editor):
+            if not self._ensure_editor_ready(editor, "border_progress"):
                 return
             prompt = "redraw this image as " + base
             model = f"editor:{editor}"
@@ -2922,7 +2942,7 @@ class App:
             missing.append(("checkpoints", FLUX_CLIP_SRC))
         return missing
 
-    def _install_editor(self, engine, missing):
+    def _install_editor(self, engine, missing, channel="progress"):
         try:
             entries = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
         except Exception:
@@ -2938,14 +2958,14 @@ class App:
                 download_model_update(
                     dict(e, size=0),
                     lambda s: self.ui_queue.put(("status", s)),
-                    lambda d, t: self.ui_queue.put(("progress", d, t)))
+                    lambda d, t: self.ui_queue.put((channel, d, t)))
             except Exception as ex:
                 self.ui_queue.put(("error", f"download failed: {ex}"))
                 return
         self.ui_queue.put(("status", "Editor installed — hit Generate "
                                      "again."))
 
-    def _ensure_editor_ready(self, editor):
+    def _ensure_editor_ready(self, editor, channel="progress"):
         """True when the editor can run now; otherwise guides the user
         (VRAM block, download offer, engine restart) and returns False."""
         tier = self._editor_tier(editor)
@@ -2968,7 +2988,7 @@ class App:
                     "\n\nDownload now? Watch the status bar; hit "
                     "Generate again when it says done."):
                 threading.Thread(target=self._install_editor,
-                                 args=(editor, missing),
+                                 args=(editor, missing, channel),
                                  daemon=True).start()
             return False
         if not self._engine_knows_editor(editor):
@@ -3105,7 +3125,7 @@ class App:
                                           "slash', 'idle breathing, cape "
                                           "swaying'.")
             return
-        if not self._ensure_editor_ready("wan"):
+        if not self._ensure_editor_ready("wan", "anim_progress"):
             return
         w, h = ANIM_SIZES[self.anim_size_var.get()]
         secs = max(1, min(5, self.anim_secs_var.get()))

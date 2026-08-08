@@ -1,5 +1,14 @@
 # Changelog — Comic Book Art Creator
 
+## v1.9.1 — 2026-08-08
+- Fixes "NameError: make_collage is not defined" when generating a
+  border with reference images — the reference-collage helper was lost
+  in an earlier refactor and has been rebuilt (one ref letterboxes,
+  several tile in a grid on the border canvas).
+- Editor model downloads triggered from the Border maker or Animator
+  now drive that section's own progress bar instead of the main
+  Generate bar.
+
 ## v1.9.0 — 2026-08-07
 - Animator preset actions: a new "Preset" dropdown above the Action box
   with 25 hand-tuned animation prompts in alphabetical order (Attacking,
