@@ -1,5 +1,17 @@
 # Changelog — Comic Book Art Creator
 
+## v1.8.0 — 2026-08-07
+- Live GPU memory meter top-right: green bar + "used / max MB" readout,
+  refreshed every 3 seconds from the driver — watch VRAM fill as models
+  load and free up when jobs end.
+- Editor entries now show their VRAM requirement (e.g. "needs ~24 GB");
+  editors beyond the card's memory are greyed out and can't be selected,
+  with an explanation of exactly how much they need.
+- Three-tier VRAM handling for models and editors: green = comfortable,
+  RED = tight fit — it will load and run but slower (one-time warning
+  explains it), grey = blocked. Close-to-the-limit cards can now use
+  everything that physically loads.
+
 ## v1.7.7 — 2026-08-07
 - Defringe corrected (v1.7.6's version could worsen the outline): the
   background color is now measured from the RAW frame's corners before

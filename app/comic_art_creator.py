@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.8.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -433,6 +433,7 @@ EDITOR_ENGINES = {
     "Flux Kontext — best overall edits": "kontext",
     "Qwen Image Edit — best text removal (Apache)": "qwen",
 }
+EDITOR_VRAM = {"kontext": 16, "qwen": 24, "wan": 16, "wanflf": 20}
 KONTEXT_FILE = "flux1-dev-kontext_fp8_scaled.safetensors"
 QWEN_EDIT_FILE = "qwen_image_edit_2511_fp8mixed.safetensors"
 QWEN_TE_FILE = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
@@ -1153,6 +1154,7 @@ class App:
         self.vram_gb = gpu_vram_gb()   # None = no NVIDIA GPU detected
         self._model_fits = {}      # raw name -> fits in VRAM
         self._last_fit_display = ""
+        self._warned_vram = set()   # tight-fit warnings shown once each
 
         self._build_ui()
         self._apply_ui_state(self.settings.get("ui", {}))
@@ -1163,7 +1165,27 @@ class App:
         root.after(100, self._poll_queue)
         threading.Thread(target=self._boot_engine, daemon=True).start()
         threading.Thread(target=self._check_updates_bg, daemon=True).start()
+        if self.vram_gb is not None:
+            threading.Thread(target=self._vram_poll, daemon=True).start()
         root.after(600, self._first_run_check)
+
+    def _vram_poll(self):
+        """Live GPU memory readings for the top-right meter."""
+        while True:
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=NO_WINDOW)
+                if r.returncode == 0 and r.stdout.strip():
+                    used, total = [int(x.strip()) for x in
+                                   r.stdout.strip().splitlines()[0]
+                                   .split(",")]
+                    self.ui_queue.put(("vram_live", used, total))
+            except Exception:
+                pass
+            time.sleep(3)
 
     def _first_run_check(self):
         """On a machine where Setup hasn't run (or ran engine-only),
@@ -1222,6 +1244,9 @@ class App:
         s.configure("Fit.TCombobox", padding=4, foreground=ACCENT2)
         s.map("Fit.TCombobox", fieldbackground=[("readonly", BG3)],
               foreground=[("readonly", ACCENT2)])
+        s.configure("Warn.TCombobox", padding=4, foreground="#e74c3c")
+        s.map("Warn.TCombobox", fieldbackground=[("readonly", BG3)],
+              foreground=[("readonly", "#e74c3c")])
         s.configure("NoFit.TCombobox", padding=4, foreground="#77778a")
         s.map("NoFit.TCombobox", fieldbackground=[("readonly", BG3)],
               foreground=[("readonly", "#77778a")])
@@ -1423,12 +1448,15 @@ class App:
         erow.columnconfigure(1, weight=1)
         ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
                                                                 column=0)
-        self.editor_var = StringVar(value=list(EDITOR_ENGINES)[0])
-        ttk.Combobox(erow, textvariable=self.editor_var, state="readonly",
-                     exportselection=False,
-                     values=list(EDITOR_ENGINES)).grid(row=0, column=1,
-                                                       padx=(4, 0),
-                                                       sticky="ew")
+        self.editor_var = StringVar()
+        self._editor_display = {}
+        self.editor_dd = ttk.Combobox(erow, textvariable=self.editor_var,
+                                      state="readonly",
+                                      exportselection=False)
+        self.editor_dd.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        self.editor_dd.bind("<<ComboboxSelected>>",
+                            lambda _e: self._on_editor_pick())
+        self._refresh_editor_list()
         self.editor_canvas_var = BooleanVar(value=False)
         ttk.Checkbutton(left, text="Output at canvas size (re-stage into "
                                    "the size selected below instead of "
@@ -1594,13 +1622,25 @@ class App:
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
         right.grid(row=0, column=1, sticky=NSEW)
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        # live VRAM meter (top right): green bar = used / max MB
+        vrow = ttk.Frame(right)
+        vrow.grid(row=0, column=0, sticky="e", pady=(0, 6))
+        self.vram_label_var = StringVar(
+            value="GPU — MB" if self.vram_gb is not None
+            else "no NVIDIA GPU")
+        ttk.Label(vrow, textvariable=self.vram_label_var,
+                  style="Dim.TLabel").pack(side="left", padx=(0, 8))
+        self.vram_bar = ttk.Progressbar(vrow, mode="determinate",
+                                        length=220)
+        self.vram_bar.pack(side="left")
 
         self.canvas = Canvas(right, bg=BG2, highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky=NSEW)
+        self.canvas.grid(row=1, column=0, sticky=NSEW)
         self.canvas.bind("<Configure>", lambda e: self._show_current())
 
-        brow = ttk.Frame(right); brow.grid(row=1, column=0, sticky=NSEW, pady=(8, 4))
+        brow = ttk.Frame(right); brow.grid(row=2, column=0, sticky=NSEW, pady=(8, 4))
         ttk.Button(brow, text="💾 Save As…", command=self._save_as).pack(side="left")
         ttk.Button(brow, text="🗑 Delete image",
                    command=self._delete_current).pack(side="left", padx=6)
@@ -1616,7 +1656,7 @@ class App:
 
         # gallery strip — horizontally scrollable, with its own clear button
         gwrap = ttk.Frame(right)
-        gwrap.grid(row=2, column=0, sticky=NSEW, pady=(4, 0))
+        gwrap.grid(row=3, column=0, sticky=NSEW, pady=(4, 0))
         gwrap.columnconfigure(0, weight=1)
         self.gallery_canvas = Canvas(gwrap, height=96, bg=BG,
                                      highlightthickness=0)
@@ -1665,7 +1705,7 @@ class App:
             "loras": self._selected_loras(),
             "lora_strength": round(self.lora_strength.get(), 2),
             "ref_images": self.ref_paths,
-            "editor": self.editor_var.get(),
+            "editor": self._editor_engine(),
             "editor_canvas": self.editor_canvas_var.get(),
             "border_refs": self.border_ref_paths,
             "change": int(self.change_var.get()),
@@ -1714,8 +1754,11 @@ class App:
                 first = Path(self.ref_paths[0]).name
                 self.ref_var.set(first if len(self.ref_paths) == 1 else
                                  f"{len(self.ref_paths)} images ({first}, …)")
-            if st.get("editor") in EDITOR_ENGINES:
-                self.editor_var.set(st["editor"])
+            if st.get("editor") in EDITOR_ENGINES.values():
+                for disp, e in self._editor_display.items():
+                    if e == st["editor"] and self._editor_fits(e):
+                        self.editor_var.set(disp)
+                        break
             self.editor_canvas_var.set(st.get("editor_canvas", False))
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
@@ -1945,6 +1988,82 @@ class App:
                                  if p.get("model_hint", "sdxl") == want]
         self.preset_dd["values"] = names
 
+    def _editor_engine(self):
+        return self._editor_display.get(self.editor_var.get(), "kontext")
+
+    def _editor_tier(self, engine):
+        """ok = comfortable, warn = loads but slow, block = too big."""
+        if self.vram_gb is None:
+            return "ok"
+        req = EDITOR_VRAM.get(engine, 16)
+        if req <= self.vram_gb:
+            return "ok"
+        if req - 4 <= self.vram_gb:
+            return "warn"
+        return "block"
+
+    def _editor_fits(self, engine):
+        return self._editor_tier(engine) != "block"
+
+    def _refresh_editor_list(self):
+        """Editor entries show their VRAM requirement; tight fits show
+        red, ones beyond the card are greyed and blocked."""
+        prev = self._editor_engine() if self._editor_display else "kontext"
+        self._editor_display = {}
+        for label, engine in EDITOR_ENGINES.items():
+            req = EDITOR_VRAM.get(engine, 16)
+            disp = f"{label} — needs ~{req} GB VRAM"
+            tier = self._editor_tier(engine)
+            if tier == "warn":
+                disp += "  — tight fit: slow"
+            elif tier == "block":
+                disp += "  — exceeds GPU memory"
+            self._editor_display[disp] = engine
+        self.editor_dd["values"] = list(self._editor_display)
+        self.editor_dd.configure(postcommand=self._color_editor_dropdown)
+        target = prev if self._editor_fits(prev) else next(
+            (e for e in EDITOR_ENGINES.values() if self._editor_fits(e)),
+            prev)
+        for disp, engine in self._editor_display.items():
+            if engine == target:
+                self.editor_var.set(disp)
+                break
+
+    def _color_editor_dropdown(self):
+        try:
+            pd = self.root.tk.call("ttk::combobox::PopdownWindow",
+                                   self.editor_dd)
+            lb = f"{pd}.f.l"
+            for i, disp in enumerate(self.editor_dd["values"]):
+                tier = self._editor_tier(
+                    self._editor_display.get(disp, "kontext"))
+                self.root.tk.call(lb, "itemconfigure", i, "-foreground",
+                                  self.TIER_COLORS.get(tier, ACCENT2))
+        except Exception:
+            pass
+
+    def _on_editor_pick(self):
+        engine = self._editor_engine()
+        tier = self._editor_tier(engine)
+        if tier == "block":
+            messagebox.showwarning(
+                "Not enough GPU memory",
+                f"This editor needs ~{EDITOR_VRAM.get(engine, 16)} GB of "
+                f"VRAM — your card has {self.vram_gb:.1f} GB. Pick a "
+                "green editor instead.")
+            for disp, e in self._editor_display.items():
+                if self._editor_fits(e):
+                    self.editor_var.set(disp)
+                    break
+        elif tier == "warn" and engine not in self._warned_vram:
+            self._warned_vram.add(engine)
+            messagebox.showwarning(
+                "Tight VRAM fit",
+                f"This editor needs ~{EDITOR_VRAM.get(engine, 16)} GB — "
+                f"your card has {self.vram_gb:.1f} GB. It will load and "
+                "run, but expect noticeably slower edits while memory "
+                "is paged.")
+
     def _vram_block_msg(self, raw):
         gb = self._size_gb(raw)
         messagebox.showwarning(
@@ -1955,11 +2074,19 @@ class App:
 
     def _on_model_pick(self):
         raw = self._model_raw()
-        if not self._model_fits.get(raw, True):
+        tier = self._model_fits.get(raw, "ok")
+        if tier == "block":
             self._vram_block_msg(raw)
             if self._last_fit_display:
                 self.model_var.set(self._last_fit_display)
         else:
+            if tier == "warn" and raw not in self._warned_vram:
+                self._warned_vram.add(raw)
+                messagebox.showwarning(
+                    "Tight VRAM fit",
+                    f"{raw} will load and run, but it nearly fills your "
+                    f"card ({self.vram_gb:.1f} GB) — expect noticeably "
+                    "slower generation while memory is paged.")
             self._last_fit_display = self.model_var.get()
         self._update_model_entry_style()
         self._refresh_preset_list()
@@ -1985,28 +2112,38 @@ class App:
         except OSError:
             return 0
 
-    def _model_fits_vram(self, gb):
+    TIER_COLORS = {"ok": ACCENT2, "warn": "#e74c3c", "block": "#5a5a6a"}
+    TIER_STYLES = {"ok": "Fit.TCombobox", "warn": "Warn.TCombobox",
+                   "block": "NoFit.TCombobox"}
+
+    def _model_tier_of(self, gb):
+        """ok = comfortable, warn = loads but slow (tight fit),
+        block = exceeds the card."""
         if self.vram_gb is None or not gb:
-            return True   # unknown GPU or unknown size: don't block
-        return gb + VRAM_HEADROOM_GB <= self.vram_gb
+            return "ok"
+        if gb + VRAM_HEADROOM_GB <= self.vram_gb:
+            return "ok"
+        if gb <= self.vram_gb:
+            return "warn"
+        return "block"
 
     def _color_model_dropdown(self, dd):
-        """Green = fits this GPU, grey = exceeds its memory (Tk popdown)."""
+        """Green = fits, red = tight fit (slow), grey = too big."""
         try:
             pd = self.root.tk.call("ttk::combobox::PopdownWindow", dd)
             lb = f"{pd}.f.l"
             for i, disp in enumerate(dd["values"]):
                 raw = self._model_display.get(disp, disp)
-                fits = self._model_fits.get(raw, True)
+                tier = self._model_fits.get(raw, "ok")
                 self.root.tk.call(lb, "itemconfigure", i, "-foreground",
-                                  ACCENT2 if fits else "#5a5a6a")
+                                  self.TIER_COLORS.get(tier, ACCENT2))
         except Exception:
             pass
 
     def _update_model_entry_style(self):
-        fits = self._model_fits.get(self._model_raw(), True)
-        self.model_dd.configure(style="Fit.TCombobox" if fits
-                                else "NoFit.TCombobox")
+        tier = self._model_fits.get(self._model_raw(), "ok")
+        self.model_dd.configure(style=self.TIER_STYLES.get(
+            tier, "Fit.TCombobox"))
 
     def _refresh_models(self):
         ckpts = list_checkpoints()
@@ -2014,10 +2151,12 @@ class App:
         self._model_fits = {}
         for name in ckpts:
             gb = self._size_gb(name)
-            fits = self._model_fits_vram(gb)
-            self._model_fits[name] = fits
+            tier = self._model_tier_of(gb)
+            self._model_fits[name] = tier
             disp = f"{name}  ·  {gb:.1f} GB" if gb else name
-            if not fits:
+            if tier == "warn":
+                disp += "  — tight fit: slow"
+            elif tier == "block":
                 disp += "  — exceeds GPU memory"
             self._model_display[disp] = name
         self.model_dd["values"] = list(self._model_display)
@@ -2032,22 +2171,24 @@ class App:
                 "⚠ No NVIDIA GPU detected — this app requires an NVIDIA "
                 "card with a current driver; generation will not work.")
         else:
-            n_fit = sum(1 for f in self._model_fits.values() if f)
+            n_fit = sum(1 for t in self._model_fits.values() if t == "ok")
             self.vram_note.set(
-                f"Your GPU: {self.vram_gb:.1f} GB VRAM — green models fit, "
-                f"greyed models exceed it ({n_fit}/{len(ckpts)} usable).")
+                f"Your GPU: {self.vram_gb:.1f} GB VRAM — green fits, red "
+                f"runs but slow, grey too big ({n_fit}/{len(ckpts)} "
+                "comfortable).")
 
         cur = self._model_raw()
         if cur not in ckpts:
             last = self.settings.get("last_model")
             cur = last if last in ckpts else ""
-            if not cur or not self._model_fits.get(cur, True):
-                cur = next((c for c in ckpts if self._model_fits.get(c)),
+            if not cur or self._model_fits.get(cur, "ok") == "block":
+                cur = next((c for c in ckpts
+                            if self._model_fits.get(c) == "ok"),
                            ckpts[0] if ckpts else "")
         for disp, raw in self._model_display.items():
             if raw == cur:
                 self.model_var.set(disp)
-                if self._model_fits.get(raw, True):
+                if self._model_fits.get(raw, "ok") != "block":
                     self._last_fit_display = disp
                 break
         self._update_model_entry_style()
@@ -2165,7 +2306,7 @@ class App:
         else:
             full_prompt = f"{prompt}, {style}" if style else prompt
         editing = bool(self.ref_paths)
-        editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
+        editor = self._editor_engine()
         model = self._model_raw()
         if editing:
             if not self._ensure_editor_ready(editor):
@@ -2177,9 +2318,13 @@ class App:
                                               "or wait for downloads to "
                                               "finish.")
                 return
-            if not self._model_fits.get(model, True):
+            tier = self._model_fits.get(model, "ok")
+            if tier == "block":
                 self._vram_block_msg(model)
                 return
+            if tier == "warn":
+                self.status_var.set("Running close to the VRAM limit — "
+                                    "generation will be slower.")
             # the engine must actually know this model, or generation
             # 400s — a stale engine (old model paths) needs a restart
             known = _api_choices("CheckpointLoaderSimple", "ckpt_name")
@@ -2301,6 +2446,13 @@ class App:
                 elif kind == "vram":
                     self.vram_gb = msg[1]
                     self._refresh_models()   # recolor with engine's number
+                    self._refresh_editor_list()
+                elif kind == "vram_live":
+                    _, used, total = msg
+                    self.vram_bar["maximum"] = total
+                    self.vram_bar["value"] = used
+                    self.vram_label_var.set(
+                        f"GPU {used:,} / {total:,} MB")
                 elif kind == "models_changed":
                     self._refresh_models()
                 elif kind == "updates":
@@ -2571,7 +2723,7 @@ class App:
             return
         w, h = BORDER_SIZES[self.border_aspect_var.get()]
         refs = list(self.border_ref_paths)
-        editor = EDITOR_ENGINES.get(self.editor_var.get(), "kontext")
+        editor = self._editor_engine()
         base = BORDER_TEMPLATE.format(theme=theme) \
             if self.border_auto_var.get() else theme
         if refs:
@@ -2590,7 +2742,7 @@ class App:
                 messagebox.showerror("Model", "No model selected in the "
                                               "main controls.")
                 return
-            if not self._model_fits.get(model, True):
+            if self._model_fits.get(model, "ok") == "block":
                 self._vram_block_msg(model)
                 return
             strength = round(self.lora_strength.get(), 2)
@@ -2669,13 +2821,16 @@ class App:
     def _ensure_editor_ready(self, editor):
         """True when the editor can run now; otherwise guides the user
         (VRAM block, download offer, engine restart) and returns False."""
-        need = 16 if editor == "kontext" else 24
-        if self.vram_gb is not None and self.vram_gb < need:
+        tier = self._editor_tier(editor)
+        if tier == "block":
             messagebox.showwarning(
                 "Not enough GPU memory",
-                f"This editor needs about {need} GB of VRAM — your "
-                f"card has {self.vram_gb:.1f} GB.")
+                f"This editor needs about {EDITOR_VRAM.get(editor, 16)} "
+                f"GB of VRAM — your card has {self.vram_gb:.1f} GB.")
             return False
+        if tier == "warn":
+            self.status_var.set("Running close to the VRAM limit — "
+                                "expect slower processing.")
         missing = self._editor_missing(editor)
         if missing:
             gb = "12" if editor == "kontext" else "28"
