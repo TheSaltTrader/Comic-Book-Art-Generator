@@ -1,5 +1,18 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.6 — 2026-08-07
+- Loop menu finalized: Seamless auto-cut is the permanent default (fresh
+  at every launch), with Ping-pong and Crossfade as per-run options. The
+  in-place generated mode is removed from the menu — it froze
+  walking-type actions. All remaining options are guarded against short
+  clips and cannot break the pipeline.
+- Validated: 4-second walks give the auto-cutter several stride cycles;
+  loop seam measurably below general motion level (17.7 vs 22.7).
+- Defringe made adaptive and more aggressive: the background color is
+  sampled from each frame (the model repaints the stage, so it drifts),
+  silhouettes erode 2 px, and faint halo pixels are dropped — removes
+  the residual outline on transparent frames.
+
 ## v1.7.5 — 2026-08-07
 - Clean edges on transparent animation frames: new defringe pass
   un-blends the known staging color out of semi-transparent edge pixels

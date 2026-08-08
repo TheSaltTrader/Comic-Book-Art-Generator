@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -564,9 +564,8 @@ ANIM_KEEP = {
     "every 3rd (8 fps)": 3,
     "every 4th (6 fps)": 4,
 }
-ANIM_LOOPS = ["Seamless motion (auto-cut — walks, runs)",
-              "Seamless in-place (generated — capes, idle)",
-              "Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+ANIM_LOOPS = ["Seamless (auto-cut — default)",
+              "Ping-pong (perfect loop)", "Crossfade (blend ends)"]
 
 
 def frame_diff(a, b):
@@ -721,19 +720,27 @@ def remove_background_dir(src_dir, dst_dir):
 STAGE_BG = (200, 200, 205)   # the neutral staging color used for prep
 
 
-def defringe(img, bg=STAGE_BG, erode=1, feather=0.6):
-    """Remove background-color contamination from semi-transparent edge
-    pixels (the staging color is known exactly, so it can be un-blended),
-    then tighten and smooth the silhouette. Kills white outlines and
-    rough edges on cut-out animation frames."""
+def defringe(img, bg=None, erode=2, feather=0.8, alpha_floor=40):
+    """Remove background contamination from semi-transparent edge pixels,
+    then tighten and smooth the silhouette. The actual background color
+    is sampled from the frame itself (the video model repaints the stage,
+    so it drifts from the nominal staging color); faint halo pixels below
+    alpha_floor are dropped entirely."""
     import numpy as np
     arr = np.asarray(img.convert("RGBA")).astype(np.float32)
     a = arr[..., 3:4] / 255.0
     rgb = arr[..., :3]
-    bg_arr = np.array(bg, dtype=np.float32)
+    if bg is None:
+        mask0 = arr[..., 3] == 0
+        bg_arr = rgb[mask0].mean(axis=0) if mask0.sum() > 100 \
+            else np.array(STAGE_BG, dtype=np.float32)
+    else:
+        bg_arr = np.array(bg, dtype=np.float32)
     fg = (rgb - bg_arr * (1.0 - a)) / np.maximum(a, 1e-4)
     fg = np.clip(fg, 0, 255)
-    out = np.concatenate([fg, arr[..., 3:4]], axis=-1).astype(np.uint8)
+    alpha_ch = np.where(arr[..., 3] < alpha_floor, 0.0, arr[..., 3])
+    out = np.concatenate([fg, alpha_ch[..., None]],
+                         axis=-1).astype(np.uint8)
     res = Image.fromarray(out, "RGBA")
     alpha = res.getchannel("A")
     if erode:
@@ -1719,8 +1726,8 @@ class App:
             self.anim_secs_var.set(st.get("anim_secs", 2))
             if st.get("anim_keep") in ANIM_KEEP:
                 self.anim_keep_var.set(st["anim_keep"])
-            if st.get("anim_loop") in ANIM_LOOPS:
-                self.anim_loop_var.set(st["anim_loop"])
+            # anim_loop intentionally NOT restored: auto-cut is always
+            # the default at launch (per-run changes still allowed)
             if st.get("anim_size") in ANIM_SIZES:
                 self.anim_size_var.set(st["anim_size"])
             self.anim_transparent_var.set(st.get("anim_transparent", True))
@@ -2803,17 +2810,15 @@ class App:
                                           "slash', 'idle breathing, cape "
                                           "swaying'.")
             return
-        seamless = self.anim_loop_var.get().startswith("Seamless in-place")
-        if not self._ensure_editor_ready("wanflf" if seamless else "wan"):
+        if not self._ensure_editor_ready("wan"):
             return
         w, h = ANIM_SIZES[self.anim_size_var.get()]
         secs = max(1, min(5, self.anim_secs_var.get()))
-        base_fps = 16 if seamless else 24   # Wan 2.1 FLF is a 16 fps model
+        base_fps = 24
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
         p = dict(image=self.anim_image_path, action=action, w=w, h=h,
                  length=base_fps * secs + 1, base_fps=base_fps,
-                 seamless=seamless,
                  keep_every=ANIM_KEEP.get(self.anim_keep_var.get(), 2),
                  loop=self.anim_loop_var.get(),
                  transparent=self.anim_transparent_var.get(),
@@ -2849,8 +2854,7 @@ class App:
                       "camera, no camera movement, no scene change.")
             gp = dict(prompt=prompt, anim_image_name=name, width=p["w"],
                       height=p["h"], length=p["length"], seed=p["seed"])
-            graph = build_wan_flf_graph(gp) if p.get("seamless") \
-                else build_wan_graph(gp)
+            graph = build_wan_graph(gp)
             import websocket
             ws = websocket.WebSocket()
             ws.connect(f"ws://{ENGINE_HOST}:{ENGINE_PORT}/ws"
@@ -2875,10 +2879,8 @@ class App:
                 raise RuntimeError("animation produced no frames")
             status(f"Fetching {len(metas)} frames…")
             frames = [gen._fetch_image(m) for m in metas]
-            if p.get("seamless") and len(frames) > 2:
-                frames = frames[:-1]   # last frame == first: drop the dupe
             kept = frames[::p["keep_every"]]
-            if p["loop"].startswith("Seamless motion"):
+            if p["loop"].startswith("Seamless"):
                 kept = best_loop_cut(kept)
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2909,8 +2911,7 @@ class App:
 
             result_path = frames_dir / "frame_000.png"
             if p.get("gif", True):
-                looped = kept if p.get("seamless") \
-                    or p["loop"].startswith("Seamless motion") \
+                looped = kept if p["loop"].startswith("Seamless") \
                     else apply_loop(kept, p["loop"])
                 fps_out = p.get("base_fps", 24) / p["keep_every"]
                 result_path = out_dir / "animation.gif"
