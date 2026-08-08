@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.7.7"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -720,22 +720,29 @@ def remove_background_dir(src_dir, dst_dir):
 STAGE_BG = (200, 200, 205)   # the neutral staging color used for prep
 
 
-def defringe(img, bg=None, erode=2, feather=0.8, alpha_floor=40):
-    """Remove background contamination from semi-transparent edge pixels,
-    then tighten and smooth the silhouette. The actual background color
-    is sampled from the frame itself (the video model repaints the stage,
-    so it drifts from the nominal staging color); faint halo pixels below
-    alpha_floor are dropped entirely."""
+def estimate_bg(img, patch=24):
+    """Actual background color of a RAW (pre-cutout) frame, sampled from
+    its four corners — the video model repaints the stage, so the true
+    color drifts from the nominal staging gray."""
+    import numpy as np
+    arr = np.asarray(img.convert("RGB")).astype(np.float32)
+    corners = np.concatenate([
+        arr[:patch, :patch].reshape(-1, 3),
+        arr[:patch, -patch:].reshape(-1, 3),
+        arr[-patch:, :patch].reshape(-1, 3),
+        arr[-patch:, -patch:].reshape(-1, 3)])
+    return tuple(float(v) for v in corners.mean(axis=0))
+
+
+def defringe(img, bg=STAGE_BG, erode=1, feather=0.5, alpha_floor=30):
+    """Un-blend the background color out of semi-transparent edge pixels
+    (pass the color measured from the RAW frame via estimate_bg), drop
+    faint halo pixels, then tighten and smooth the silhouette."""
     import numpy as np
     arr = np.asarray(img.convert("RGBA")).astype(np.float32)
     a = arr[..., 3:4] / 255.0
     rgb = arr[..., :3]
-    if bg is None:
-        mask0 = arr[..., 3] == 0
-        bg_arr = rgb[mask0].mean(axis=0) if mask0.sum() > 100 \
-            else np.array(STAGE_BG, dtype=np.float32)
-    else:
-        bg_arr = np.array(bg, dtype=np.float32)
+    bg_arr = np.array(bg, dtype=np.float32)
     fg = (rgb - bg_arr * (1.0 - a)) / np.maximum(a, 1e-4)
     fg = np.clip(fg, 0, 255)
     alpha_ch = np.where(arr[..., 3] < alpha_floor, 0.0, arr[..., 3])
@@ -2899,9 +2906,12 @@ class App:
                     f.save(raw_dir / f"frame_{i:03d}.png")
                 remove_background_dir(raw_dir, frames_dir)
                 status("Cleaning frame edges (defringe)…")
+                raw_files = sorted(raw_dir.glob("*.png"))
+                bgs = [estimate_bg(Image.open(rf)) for rf in raw_files]
                 kept = []
-                for fp in sorted(frames_dir.glob("*.png")):
-                    f = defringe(Image.open(fp).convert("RGBA"))
+                for i, fp in enumerate(sorted(frames_dir.glob("*.png"))):
+                    bg = bgs[i] if i < len(bgs) else STAGE_BG
+                    f = defringe(Image.open(fp).convert("RGBA"), bg=bg)
                     f.save(fp)   # frames on disk get clean edges too
                     kept.append(f)
                 shutil.rmtree(raw_dir, ignore_errors=True)

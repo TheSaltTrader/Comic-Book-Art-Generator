@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.7 — 2026-08-07
+- Defringe corrected (v1.7.6's version could worsen the outline): the
+  background color is now measured from the RAW frame's corners before
+  cutting (sampling the cut frame read black transparent pixels and
+  neutralized the un-blend), and the silhouette parameters returned to
+  moderate (1 px tighten + halo-dust removal). Validated best-of-three
+  on the walking character.
+
 ## v1.7.6 — 2026-08-07
 - Loop menu finalized: Seamless auto-cut is the permanent default (fresh
   at every launch), with Ping-pong and Crossfade as per-run options. The
