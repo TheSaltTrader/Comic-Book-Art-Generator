@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.8.1 — 2026-08-07
+- Fixes near-static animation loops from short prompts: the auto-cutter
+  now only considers segments that actually contain motion (it could
+  previously pick the quietest chunk of a weak clip). Terse actions like
+  "walking" are automatically expanded into an explicit full-body cycle
+  description, and the default duration is 3 seconds.
+
 ## v1.8.0 — 2026-08-07
 - Live GPU memory meter top-right: green bar + "used / max MB" readout,
   refreshed every 3 seconds from the driver — watch VRAM fill as models

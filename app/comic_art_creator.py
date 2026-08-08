@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -578,9 +578,10 @@ def frame_diff(a, b):
 
 
 def best_loop_cut(frames, min_len=8):
-    """Cut the clip at its most similar frame pair: frames[i:j] then
-    loops forward with a naturally closing seam — fluid motion, no
-    reversal. Ideal for periodic actions like walk cycles."""
+    """Cut the clip at its most similar frame pair — but only among
+    segments that actually CONTAIN motion. Without the motion filter the
+    cutter grabs the quietest chunk of a weak clip and the loop looks
+    nearly static."""
     n = len(frames)
     if n < min_len + 3:
         return frames
@@ -590,13 +591,21 @@ def best_loop_cut(frames, min_len=8):
         hst = ImageChops.difference(a, b).histogram()
         return sum(hst[i] * i for i in range(len(hst))) / (64 * 64)
 
-    best = None
+    succ = [sdiff(small[k], small[k + 1]) for k in range(n - 1)]
+    clip_motion = sum(succ) / max(1, len(succ))
+    best, fallback = None, None
     for i in range(0, max(1, n // 3)):
         for j in range(i + min_len, n):
             d = sdiff(small[i], small[j])
+            if fallback is None or d < fallback[0]:
+                fallback = (d, i, j)
+            seg = succ[i:j - 1]
+            seg_motion = sum(seg) / max(1, len(seg))
+            if seg_motion < 0.6 * clip_motion:
+                continue   # quiet segment — would loop as near-static
             if best is None or d < best[0]:
                 best = (d, i, j)
-    _, i, j = best
+    _, i, j = best if best is not None else fallback
     return frames[i:j]
 ANIM_MOTION = {
     "Strong (recommended)":
@@ -1504,7 +1513,7 @@ class App:
         a2 = ttk.Frame(left); a2.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(a2, text="Seconds", style="Dim.TLabel").grid(row=0,
                                                                column=0)
-        self.anim_secs_var = IntVar(value=2)
+        self.anim_secs_var = IntVar(value=3)
         ttk.Spinbox(a2, from_=1, to=5, textvariable=self.anim_secs_var,
                     exportselection=False, width=3).grid(row=0, column=1,
                                                          padx=(4, 10))
@@ -3010,7 +3019,14 @@ class App:
                                    "cbac_anim_prepped.png")
             motion = ANIM_MOTION.get(p.get("motion", ""),
                                      list(ANIM_MOTION.values())[0])
-            prompt = (f"{p['action']}. {motion}. The character stays "
+            action = p["action"]
+            if len(action.split()) <= 3:
+                # terse actions ("walking") generate weak motion — expand
+                # them into an explicit full-body cycle
+                action = (f"the character is {action}, performing the "
+                          "motion as a clear full-body cycle with large "
+                          "limb movements repeating continuously")
+            prompt = (f"{action}. {motion}. The character stays "
                       "centered in frame against a flat plain solid "
                       "background, full body always visible, locked "
                       "camera, no camera movement, no scene change.")
