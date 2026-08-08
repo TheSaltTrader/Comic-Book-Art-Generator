@@ -1,5 +1,11 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.5 — 2026-08-07
+- Clean edges on transparent animation frames: new defringe pass
+  un-blends the known staging color out of semi-transparent edge pixels
+  (removes the white/gray outline), then tightens and smooths the
+  silhouette. Applied to every transparent animation frame and its GIF.
+
 ## v1.7.4 — 2026-08-07
 - New default loop mode "Seamless motion (auto-cut)": the clip is
   generated with free, fluid motion, then automatically cut at its two

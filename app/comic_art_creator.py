@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -716,6 +716,32 @@ def remove_background_dir(src_dir, dst_dir):
     if r.returncode != 0:
         raise RuntimeError(f"frame background removal failed: "
                            f"{r.stderr[-400:]}")
+
+
+STAGE_BG = (200, 200, 205)   # the neutral staging color used for prep
+
+
+def defringe(img, bg=STAGE_BG, erode=1, feather=0.6):
+    """Remove background-color contamination from semi-transparent edge
+    pixels (the staging color is known exactly, so it can be un-blended),
+    then tighten and smooth the silhouette. Kills white outlines and
+    rough edges on cut-out animation frames."""
+    import numpy as np
+    arr = np.asarray(img.convert("RGBA")).astype(np.float32)
+    a = arr[..., 3:4] / 255.0
+    rgb = arr[..., :3]
+    bg_arr = np.array(bg, dtype=np.float32)
+    fg = (rgb - bg_arr * (1.0 - a)) / np.maximum(a, 1e-4)
+    fg = np.clip(fg, 0, 255)
+    out = np.concatenate([fg, arr[..., 3:4]], axis=-1).astype(np.uint8)
+    res = Image.fromarray(out, "RGBA")
+    alpha = res.getchannel("A")
+    if erode:
+        alpha = alpha.filter(ImageFilter.MinFilter(erode * 2 + 1))
+    if feather:
+        alpha = alpha.filter(ImageFilter.GaussianBlur(feather))
+    res.putalpha(alpha)
+    return res
 
 
 def apply_loop(frames, mode):
@@ -2870,8 +2896,12 @@ class App:
                 for i, f in enumerate(kept):
                     f.save(raw_dir / f"frame_{i:03d}.png")
                 remove_background_dir(raw_dir, frames_dir)
-                kept = [Image.open(fp).convert("RGBA")
-                        for fp in sorted(frames_dir.glob("*.png"))]
+                status("Cleaning frame edges (defringe)…")
+                kept = []
+                for fp in sorted(frames_dir.glob("*.png")):
+                    f = defringe(Image.open(fp).convert("RGBA"))
+                    f.save(fp)   # frames on disk get clean edges too
+                    kept.append(f)
                 shutil.rmtree(raw_dir, ignore_errors=True)
             else:
                 for i, f in enumerate(kept):
