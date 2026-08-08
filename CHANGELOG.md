@@ -1,5 +1,16 @@
 # Changelog — Comic Book Art Creator
 
+## v1.9.0 — 2026-08-07
+- Animator preset actions: a new "Preset" dropdown above the Action box
+  with 25 hand-tuned animation prompts in alphabetical order (Attacking,
+  Blocking, Casting a spell, Celebrating, Climbing, Crouching, Dancing,
+  Dodging, Dying, Falling, Flying, Idle, Jumping, Kicking, Laughing,
+  Punching, Running, Shooting, Slashing, Sneaking, Stomping walk,
+  Taunting, Walking, Walking (side view), Waving). Selecting one fills
+  the Action box with a prompt written to produce strong, loopable
+  full-body motion — edit it freely afterwards to tailor it to your
+  character.
+
 ## v1.8.1 — 2026-08-07
 - Fixes near-static animation loops from short prompts: the auto-cutter
   now only considers segments that actually contain motion (it could

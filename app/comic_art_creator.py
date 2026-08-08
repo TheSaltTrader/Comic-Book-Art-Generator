@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.9.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -567,6 +567,113 @@ ANIM_KEEP = {
 }
 ANIM_LOOPS = ["Seamless (auto-cut — default)",
               "Ping-pong (perfect loop)", "Crossfade (blend ends)"]
+ANIM_PRESET_HINT = "— pick a preset action —"
+ANIM_PRESETS = {
+    "Attacking (melee combo)":
+        "attacking with a rapid melee combo, throwing alternating punches "
+        "and strikes with the whole upper body, hips rotating into each "
+        "blow, feet shifting stance, continuous repeating attack cycle",
+    "Blocking (raise guard)":
+        "raising both arms into a defensive block, bracing and flinching "
+        "against impacts, body rocking back slightly with each hit "
+        "absorbed, guard bobbing up and down in a repeating cycle",
+    "Casting a spell":
+        "casting a spell with both arms sweeping in wide circular "
+        "gestures, hands weaving in front of the chest, clothes and hair "
+        "flowing with the motion, body swaying, continuous repeating "
+        "casting cycle",
+    "Celebrating (victory)":
+        "celebrating a victory, pumping both fists into the air "
+        "repeatedly, bouncing on the spot, head thrown back, whole body "
+        "bouncing with joy in a continuous repeating cycle",
+    "Climbing":
+        "climbing upward hand over hand, arms reaching up alternately, "
+        "knees lifting high to find footholds, whole body pulling upward "
+        "in a clear repeating climbing cycle",
+    "Crouching":
+        "crouching down low and rising back up, knees bending deeply, "
+        "arms out for balance, weight shifting smoothly, continuous "
+        "repeating crouch cycle",
+    "Dancing":
+        "dancing energetically, hips swaying side to side, arms waving "
+        "above the head, feet stepping in rhythm, whole body grooving in "
+        "a continuous repeating dance cycle",
+    "Dodging":
+        "dodging side to side, ducking and weaving with quick head and "
+        "torso movement, feet shuffling, shoulders dipping left and "
+        "right in a fast repeating cycle",
+    "Dying (defeated)":
+        "staggering and collapsing in defeat, clutching the chest, knees "
+        "buckling, falling to the knees and slumping forward with "
+        "dramatic full-body motion",
+    "Falling":
+        "falling through the air, arms and legs flailing, body tumbling "
+        "slightly, hair and clothes whipping upward, continuous dramatic "
+        "falling motion",
+    "Flying":
+        "flying forward with cape and clothes rippling in the wind, arms "
+        "stretched ahead, body bobbing gently up and down, legs "
+        "trailing, continuous smooth flying cycle",
+    "Idle (breathing)":
+        "standing idle in a ready stance, chest rising and falling with "
+        "deep breaths, arms swaying slightly, weight shifting gently "
+        "from foot to foot in a subtle repeating idle cycle",
+    "Jumping":
+        "jumping straight up and landing, knees bending deep before "
+        "launch, arms swinging up for lift, feet leaving the ground, "
+        "landing in a crouch, continuous repeating jump cycle",
+    "Kicking":
+        "throwing high kicks, legs snapping up alternately toward head "
+        "height, arms out for balance, hips rotating into each kick, "
+        "continuous repeating kicking cycle",
+    "Laughing":
+        "laughing hard, head thrown back, shoulders shaking up and "
+        "down, one hand slapping the knee, belly heaving, whole body "
+        "bouncing in a continuous repeating laugh",
+    "Punching":
+        "throwing powerful alternating punches, fists snapping forward "
+        "one after the other, shoulders and hips rotating into each "
+        "punch, feet planted in a fighting stance, continuous repeating "
+        "punching cycle",
+    "Running":
+        "running fast with knees lifting high, arms pumping hard, feet "
+        "leaving the ground mid-stride, body leaning forward, hair and "
+        "clothes streaming back, continuous repeating running cycle",
+    "Shooting":
+        "aiming and firing a weapon, arms raised, recoil kicking the "
+        "arms and shoulders back with each shot, body bracing and "
+        "recovering, continuous repeating shooting cycle",
+    "Slashing (sword)":
+        "slashing with a sword in wide sweeping arcs, blade swinging "
+        "diagonally across the body, hips and shoulders rotating into "
+        "each swing, feet shifting stance, continuous repeating "
+        "slashing cycle",
+    "Sneaking":
+        "sneaking forward on tiptoe with exaggerated slow steps, knees "
+        "lifting high, body crouched low, arms raised carefully, head "
+        "scanning side to side, continuous repeating sneaking cycle",
+    "Stomping walk (heavy)":
+        "stomping forward with heavy powerful steps, whole body "
+        "shifting weight side to side with each footfall, arms swinging "
+        "with momentum, shoulders rocking, continuous heavy walking "
+        "cycle",
+    "Taunting":
+        "taunting mockingly, beckoning with one hand in a come-here "
+        "gesture, shrugging shoulders, head tilting side to side, body "
+        "swaying cockily in a continuous repeating cycle",
+    "Walking":
+        "walking forward with a steady stride, legs alternating in full "
+        "steps, arms swinging naturally at the sides, whole body moving "
+        "in a continuous walk cycle",
+    "Walking (side view)":
+        "walking in place in profile view, legs lifting and stepping in "
+        "a clear repeating cycle, knees rising visibly, arms pumping "
+        "back and forth, exaggerated cartoon walk cycle",
+    "Waving":
+        "waving hello with one arm raised high, hand sweeping side to "
+        "side widely, shoulders and torso swaying along, continuous "
+        "repeating waving cycle",
+}
 
 
 def frame_diff(a, b):
@@ -1506,6 +1613,17 @@ class App:
         ttk.Button(arow, text="✕", width=3,
                    command=self._clear_anim_image).grid(row=0, column=3,
                                                         padx=(4, 0))
+        prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(4, 0))
+        r += 1
+        prow.columnconfigure(1, weight=1)
+        ttk.Label(prow, text="Preset", style="Dim.TLabel").grid(row=0,
+                                                                column=0)
+        self.anim_preset_var = StringVar(value=ANIM_PRESET_HINT)
+        pcb = ttk.Combobox(prow, textvariable=self.anim_preset_var,
+                           state="readonly", exportselection=False,
+                           values=list(ANIM_PRESETS), width=30)
+        pcb.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        pcb.bind("<<ComboboxSelected>>", self._on_anim_preset)
         ttk.Label(left, text="Action (what the character does):",
                   style="Dim.TLabel").grid(row=r, sticky=W); r += 1
         self.anim_prompt_box = self._text(left, 2)
@@ -2961,6 +3079,12 @@ class App:
         self.anim_image_path = None
         self.anim_img_var.set("none")
         self._schedule_persist()
+
+    def _on_anim_preset(self, _event=None):
+        txt = ANIM_PRESETS.get(self.anim_preset_var.get())
+        if txt:
+            self._set(self.anim_prompt_box, txt)
+            self._schedule_persist()
 
     def _generate_animation(self):
         if self._busy_guard():
