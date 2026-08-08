@@ -27,3 +27,8 @@ releases/
 # --- python noise ---
 __pycache__/
 *.pyc
+
+# loose media in project root
+*.gif
+*.png
+*.jpg
