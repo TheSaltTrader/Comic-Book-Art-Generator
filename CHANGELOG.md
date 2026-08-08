@@ -1,5 +1,21 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.0 — 2026-08-08
+- Border maker gets its own **Model** and **Style** dropdowns (defaults:
+  "Same as main", no style) — pick a different model/style for borders
+  without touching the main controls. Both persist across sessions.
+- **✕ Cancel buttons** next to all three progress bars (main, animator,
+  border) — stop a running generation at any time.
+- **"Loading the model…" feedback**: the status line now says when the
+  engine is loading a model into GPU memory, explaining the pause
+  before the progress bar starts (this was the "nothing happens" wait).
+- New first-run defaults: BW Manga + Graphic Novel + LineArt Manga
+  LoRAs preselected, Wide canvas, Marvel House Style, "Output at canvas
+  size" checked; the Editor now always starts on Flux Kontext.
+- Groundwork for the trained border LoRA (SDXL_BorderFrames_v1): when
+  installed, the Border maker auto-applies it on SDXL-family models
+  with its trigger word for properly designed frames.
+
 ## v1.9.1 — 2026-08-08
 - Fixes "NameError: make_collage is not defined" when generating a
   border with reference images — the reference-collage helper was lost

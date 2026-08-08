@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1060,6 +1060,9 @@ BORDER_SIZES = {
 BORDER_NEGATIVE = ("text, letters, words, numbers, writing, typography, "
                    "logo, watermark, signature, caption, label, subtitles")
 
+BORDER_SAME_MODEL = "Same as main (default)"
+BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
+BORDER_TRIGGER = "cbacframe"
 BORDER_TEMPLATE = (
     "epic decorative border frame themed after {theme}, filled with "
     "iconic visual motifs, props, character silhouettes, colors and "
@@ -1232,6 +1235,7 @@ class Generator:
 
     def _await_images(self, ws, prompt_id, timeout=600):
         ws.settimeout(timeout)
+        loading_told = False
         while True:
             msg = ws.recv()
             if isinstance(msg, bytes):
@@ -1239,12 +1243,19 @@ class Generator:
             data = json.loads(msg)
             t, d = data.get("type"), data.get("data", {})
             if t == "progress":
+                loading_told = True
                 self.q.put(("progress", d.get("value", 0), d.get("max", 1)))
             elif t == "execution_error" and d.get("prompt_id") == prompt_id:
                 raise RuntimeError(d.get("exception_message", "engine error"))
-            elif t == "executing" and d.get("prompt_id") == prompt_id \
-                    and d.get("node") is None:
-                break  # finished
+            elif t == "executing" and d.get("prompt_id") == prompt_id:
+                if d.get("node") is None:
+                    break  # finished
+                if not loading_told:
+                    loading_told = True
+                    self.q.put(("status",
+                                "Loading the model into GPU memory — the "
+                                "bar starts once it's loaded (big models "
+                                "take a while on first use)…"))
         hist = api_get(f"/history/{prompt_id}")[prompt_id]
         images = []
         for node_out in hist["outputs"].values():
@@ -1475,7 +1486,7 @@ class App:
             row=r, sticky=W, pady=(6, 0)); r += 1
         prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(2, 2)); r += 1
         prow.columnconfigure(0, weight=1)
-        self.preset_var = StringVar(value=NONE_PRESET)
+        self.preset_var = StringVar(value="Marvel House Style")
         self.preset_dd = ttk.Combobox(prow, textvariable=self.preset_var,
                                       values=[NONE_PRESET], state="readonly", exportselection=False)
         self.preset_dd.grid(row=0, column=0, sticky="ew")
@@ -1526,7 +1537,7 @@ class App:
             row=r, sticky=W, pady=(8, 0)); r += 1
         srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=2); r += 1
         srow.columnconfigure(0, weight=1)
-        self.size_var = StringVar(value="Portrait — cover (832x1216)")
+        self.size_var = StringVar(value="Wide — splash (1344x768)")
         ttk.Combobox(srow, textvariable=self.size_var, state="readonly",
                      exportselection=False,
                      values=list(SIZE_PRESETS)).grid(row=0, column=0, sticky="ew")
@@ -1593,7 +1604,7 @@ class App:
         self.editor_dd.bind("<<ComboboxSelected>>",
                             lambda _e: self._on_editor_pick())
         self._refresh_editor_list()
-        self.editor_canvas_var = BooleanVar(value=False)
+        self.editor_canvas_var = BooleanVar(value=True)
         ttk.Checkbutton(left, text="Output at canvas size (re-stage into "
                                    "the size selected below instead of "
                                    "keeping the image's size)",
@@ -1612,6 +1623,9 @@ class App:
         self.pct_var = StringVar(value="")
         ttk.Label(pbrow, textvariable=self.pct_var, width=5,
                   style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(pbrow, text="✕ Cancel", width=9,
+                   command=self._cancel_generation).grid(row=0, column=2,
+                                                         padx=(4, 0))
         self.status_var = StringVar(value="Starting engine…")
         ttk.Label(left, textvariable=self.status_var,
                   style="Dim.TLabel", wraplength=400).grid(row=r, sticky=W); r += 1
@@ -1700,6 +1714,9 @@ class App:
         self.anim_pct_var = StringVar(value="")
         ttk.Label(apb, textvariable=self.anim_pct_var, width=5,
                   style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(apb, text="✕ Cancel", width=9,
+                   command=self._cancel_generation).grid(row=0, column=2,
+                                                         padx=(4, 0))
 
         # ---------- border maker (very bottom) ----------
         ttk.Label(left, text="BORDER MAKER — themed frame, transparent "
@@ -1715,9 +1732,30 @@ class App:
                                    "(uncheck to use your prompt verbatim)",
                         variable=self.border_auto_var).grid(
             row=r, sticky=W, pady=(0, 4)); r += 1
-        ttk.Label(left, text="Uses the settings above: model, LoRAs, "
-                             "Variations, Steps, Seed and Editor all come "
-                             "from the main controls.",
+        bmod = ttk.Frame(left); bmod.grid(row=r, sticky=NSEW, pady=2); r += 1
+        bmod.columnconfigure(1, weight=1)
+        ttk.Label(bmod, text="Model", style="Dim.TLabel").grid(row=0,
+                                                               column=0)
+        self.border_model_var = StringVar(value=BORDER_SAME_MODEL)
+        self.border_model_dd = ttk.Combobox(bmod,
+                                            textvariable=self.border_model_var,
+                                            state="readonly",
+                                            exportselection=False, width=34)
+        self.border_model_dd.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.border_model_dd.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._refresh_border_styles())
+        bsty = ttk.Frame(left); bsty.grid(row=r, sticky=NSEW, pady=2); r += 1
+        bsty.columnconfigure(1, weight=1)
+        ttk.Label(bsty, text="Style", style="Dim.TLabel").grid(row=0,
+                                                               column=0)
+        self.border_style_var = StringVar(value=NONE_PRESET)
+        self.border_style_dd = ttk.Combobox(bsty,
+                                            textvariable=self.border_style_var,
+                                            state="readonly",
+                                            exportselection=False, width=34)
+        self.border_style_dd.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(left, text="LoRAs, Variations, Steps, Seed and Editor "
+                             "still come from the main controls.",
                   style="Dim.TLabel", wraplength=400,
                   justify="left").grid(row=r, sticky=W); r += 1
         barow = ttk.Frame(left); barow.grid(row=r, sticky=NSEW, pady=2); r += 1
@@ -1764,6 +1802,9 @@ class App:
         self.border_pct_var = StringVar(value="")
         ttk.Label(bpb, textvariable=self.border_pct_var, width=5,
                   style="Dim.TLabel").grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(bpb, text="✕ Cancel", width=9,
+                   command=self._cancel_generation).grid(row=0, column=2,
+                                                         padx=(4, 0))
 
         # ---------- right column: preview + gallery ----------
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
@@ -1868,6 +1909,8 @@ class App:
             "anim_zip": self.anim_zip_var.get(),
             "border_theme": self._get(self.border_prompt_box),
             "border_auto": self.border_auto_var.get(),
+            "border_model": self.border_model_var.get(),
+            "border_style": self.border_style_var.get(),
             "border_aspect": self.border_aspect_var.get(),
             "border_thick": int(self.border_thick_var.get()),
             "size": self.size_var.get(),
@@ -1879,8 +1922,15 @@ class App:
             "auto_negative": self._auto_negative,
         }
 
+    DEFAULT_LORAS = {"SDXL_BW_Manga.safetensors",
+                     "SDXL_GraphicNovel.safetensors",
+                     "SDXL_LineArt_Manga.safetensors"}
+
     def _apply_ui_state(self, st):
         if not st:
+            # first run: comic-style starter selection
+            self._pending_loras = set(self.DEFAULT_LORAS)
+            self._on_preset()
             return
         try:
             self._set(self.prompt_box, st.get("prompt", ""))
@@ -1901,12 +1951,9 @@ class App:
                 first = Path(self.ref_paths[0]).name
                 self.ref_var.set(first if len(self.ref_paths) == 1 else
                                  f"{len(self.ref_paths)} images ({first}, …)")
-            if st.get("editor") in EDITOR_ENGINES.values():
-                for disp, e in self._editor_display.items():
-                    if e == st["editor"] and self._editor_fits(e):
-                        self.editor_var.set(disp)
-                        break
-            self.editor_canvas_var.set(st.get("editor_canvas", False))
+            # editor intentionally NOT restored: Flux Kontext is always
+            # the default at launch (per-session changes still allowed)
+            self.editor_canvas_var.set(st.get("editor_canvas", True))
             brefs = st.get("border_refs", [])
             self.border_ref_paths = [p for p in brefs if Path(p).exists()]
             if self.border_ref_paths:
@@ -1920,7 +1967,7 @@ class App:
                 self.anim_image_path = ai
                 self.anim_img_var.set(Path(ai).name)
             self._set(self.anim_prompt_box, st.get("anim_action", ""))
-            self.anim_secs_var.set(st.get("anim_secs", 2))
+            self.anim_secs_var.set(st.get("anim_secs", 3))
             if st.get("anim_keep") in ANIM_KEEP:
                 self.anim_keep_var.set(st["anim_keep"])
             # anim_loop intentionally NOT restored: auto-cut is always
@@ -1934,6 +1981,10 @@ class App:
             self.anim_zip_var.set(st.get("anim_zip", True))
             self._set(self.border_prompt_box, st.get("border_theme", ""))
             self.border_auto_var.set(st.get("border_auto", True))
+            if st.get("border_model"):
+                self.border_model_var.set(st["border_model"])
+            if st.get("border_style"):
+                self.border_style_var.set(st["border_style"])
             if st.get("border_aspect") in BORDER_SIZES:
                 self.border_aspect_var.set(st["border_aspect"])
             self.border_thick_var.set(st.get("border_thick", 14))
@@ -1961,6 +2012,7 @@ class App:
                     self.lora_strength, self.change_var, self.editor_var,
                     self.editor_canvas_var,
                     self.border_auto_var, self.border_aspect_var,
+                    self.border_model_var, self.border_style_var,
                     self.border_thick_var, self.anim_secs_var,
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
@@ -2137,6 +2189,27 @@ class App:
 
     def _editor_engine(self):
         return self._editor_display.get(self.editor_var.get(), "kontext")
+
+    def _border_model_raw(self):
+        disp = self.border_model_var.get()
+        display = getattr(self, "_model_display", {})
+        if disp and disp != BORDER_SAME_MODEL and disp in display:
+            return display[disp]
+        return self._model_raw()
+
+    def _border_style(self):
+        return next((p for p in self.presets
+                     if p["name"] == self.border_style_var.get()), None)
+
+    def _refresh_border_styles(self):
+        """Style options follow the border's model family — the current
+        selection is never cleared, only the option list adapts."""
+        fam = model_family(self._border_model_raw() or "")
+        want = "anime" if fam == "anime" else \
+            ("flux" if fam in ("flux", "schnell") else "sdxl")
+        self.border_style_dd["values"] = [NONE_PRESET] + [
+            p["name"] for p in self.presets
+            if p.get("model_hint", "sdxl") == want]
 
     def _editor_tier(self, engine):
         """ok = comfortable, warn = loads but slow, block = too big."""
@@ -2340,6 +2413,9 @@ class App:
                 break
         self._update_model_entry_style()
         self._refresh_preset_list()
+        self.border_model_dd["values"] = [BORDER_SAME_MODEL] + \
+            list(self._model_display)
+        self._refresh_border_styles()
 
         loras = list_loras()
         keep = set(self._selected_loras()) | getattr(self, "_pending_loras",
@@ -2405,6 +2481,24 @@ class App:
             self.pct_var.set("")
             self.status_var.set("Cancelled.")
         return True
+
+    def _cancel_generation(self):
+        """The ✕ Cancel next to each progress bar — stops the running
+        job (image, border or animation) and frees the buttons."""
+        if not self.busy:
+            return
+        try:
+            requests.post(f"{ENGINE_URL}/interrupt", timeout=5)
+        except requests.RequestException:
+            pass
+        self.busy = False
+        self.go_btn.state(["!disabled"])
+        for bar, var in ((self.progress, self.pct_var),
+                         (self.anim_progress, self.anim_pct_var),
+                         (self.border_progress, self.border_pct_var)):
+            bar["value"] = 0
+            var.set("")
+        self.status_var.set("Cancelled.")
 
     def _use_selected_for_editor(self):
         if self.current is None or not self.session:
@@ -2873,6 +2967,9 @@ class App:
         editor = self._editor_engine()
         base = BORDER_TEMPLATE.format(theme=theme) \
             if self.border_auto_var.get() else theme
+        sty = self._border_style()
+        if sty:
+            base += ", " + sty["style"]
         if refs:
             # references go through the image editor: it redraws them as
             # the border, carrying over style, characters and composition
@@ -2882,18 +2979,25 @@ class App:
             model = f"editor:{editor}"
             loras = []
         else:
-            # mimic the main generation settings: model + LoRAs
             prompt = base
-            model = self._model_raw()
+            model = self._border_model_raw()
             if not model:
-                messagebox.showerror("Model", "No model selected in the "
-                                              "main controls.")
+                messagebox.showerror("Model", "No model selected — pick "
+                                              "one in the Border maker or "
+                                              "the main controls.")
                 return
             if self._model_fits.get(model, "ok") == "block":
                 self._vram_block_msg(model)
                 return
             strength = round(self.lora_strength.get(), 2)
             loras = [(n, strength) for n in self._selected_loras()]
+            # the trained border LoRA knows what a frame IS — apply it
+            # automatically on SDXL-family models when installed
+            if model_family(model) not in ("flux", "schnell") and \
+                    BORDER_LORA_FILE in list_loras():
+                if BORDER_LORA_FILE not in [n for n, _s in loras]:
+                    loras.append((BORDER_LORA_FILE, 0.9))
+                prompt = f"{BORDER_TRIGGER}, " + prompt
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
         steps = None if self.steps_var.get() == "auto" \
