@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -566,6 +566,15 @@ ANIM_KEEP = {
 }
 ANIM_LOOPS = ["Seamless (generated loop — best)",
               "Ping-pong (perfect loop)", "Crossfade (blend ends)", "None"]
+ANIM_MOTION = {
+    "Strong (recommended)":
+        "Large, exaggerated, theatrical motion — the whole body moves "
+        "dramatically and continuously through every single frame",
+    "Normal":
+        "Clear, continuous full-body motion throughout the clip",
+    "Subtle":
+        "Subtle, natural motion",
+}
 WAN_FLF_FILE = "wan2.1_flf2v_720p_14B_fp8_e4m3fn.safetensors"
 WAN_CLIPVIS_FILE = "clip_vision_h.safetensors"
 WAN21_VAE_FILE = "wan_2.1_vae.safetensors"
@@ -1413,6 +1422,14 @@ class App:
         ttk.Combobox(a3, textvariable=self.anim_size_var, state="readonly",
                      exportselection=False, values=list(ANIM_SIZES),
                      width=18).grid(row=0, column=2)
+        a3b = ttk.Frame(left); a3b.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(a3b, text="Motion", style="Dim.TLabel").grid(row=0,
+                                                               column=0)
+        self.anim_motion_var = StringVar(value=list(ANIM_MOTION)[0])
+        ttk.Combobox(a3b, textvariable=self.anim_motion_var,
+                     state="readonly", exportselection=False,
+                     values=list(ANIM_MOTION),
+                     width=22).grid(row=0, column=1, padx=(4, 0))
         a4 = ttk.Frame(left); a4.grid(row=r, sticky=NSEW, pady=2); r += 1
         self.anim_transparent_var = BooleanVar(value=True)
         ttk.Checkbutton(a4, text="Transparent frames",
@@ -1586,6 +1603,7 @@ class App:
             "anim_loop": self.anim_loop_var.get(),
             "anim_size": self.anim_size_var.get(),
             "anim_transparent": self.anim_transparent_var.get(),
+            "anim_motion": self.anim_motion_var.get(),
             "anim_gif": self.anim_gif_var.get(),
             "anim_zip": self.anim_zip_var.get(),
             "border_theme": self._get(self.border_prompt_box),
@@ -1647,6 +1665,8 @@ class App:
             if st.get("anim_size") in ANIM_SIZES:
                 self.anim_size_var.set(st["anim_size"])
             self.anim_transparent_var.set(st.get("anim_transparent", True))
+            if st.get("anim_motion") in ANIM_MOTION:
+                self.anim_motion_var.set(st["anim_motion"])
             self.anim_gif_var.set(st.get("anim_gif", True))
             self.anim_zip_var.set(st.get("anim_zip", True))
             self._set(self.border_prompt_box, st.get("border_theme", ""))
@@ -1681,7 +1701,8 @@ class App:
                     self.border_thick_var, self.anim_secs_var,
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
-                    self.anim_gif_var, self.anim_zip_var):
+                    self.anim_motion_var, self.anim_gif_var,
+                    self.anim_zip_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box, self.anim_prompt_box):
@@ -2738,6 +2759,7 @@ class App:
                  loop=self.anim_loop_var.get(),
                  transparent=self.anim_transparent_var.get(),
                  gif=self.anim_gif_var.get(),
+                 motion=self.anim_motion_var.get(),
                  zip=self.anim_zip_var.get(), seed=seed)
         self.busy = True
         self.go_btn.state(["disabled"])
@@ -2752,10 +2774,12 @@ class App:
             status("Animating — uploading character…")
             gen = Generator(ChannelQueue(self.ui_queue, "anim_progress"))
             name = gen._upload_ref(p["image"])
-            prompt = (f"{p['action']}. The character performs the action "
-                      "smoothly in place, full body visible, flat plain "
-                      "solid background, locked camera, no camera "
-                      "movement.")
+            motion = ANIM_MOTION.get(p.get("motion", ""),
+                                     list(ANIM_MOTION.values())[0])
+            prompt = (f"{p['action']}. {motion}. The character stays "
+                      "centered in frame against a flat plain solid "
+                      "background, full body always visible, locked "
+                      "camera, no camera movement, no scene change.")
             gp = dict(prompt=prompt, anim_image_name=name, width=p["w"],
                       height=p["h"], length=p["length"], seed=p["seed"])
             graph = build_wan_flf_graph(gp) if p.get("seamless") \

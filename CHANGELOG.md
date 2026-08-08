@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.7.3 — 2026-08-07
+- Fixes near-static animations ("only the eyes blinked"): seamless mode
+  anchors first and last frames to the same pose, and the model would
+  take the laziest path. New **Motion** control (Subtle / Normal /
+  Strong, default Strong) plus a rewritten motion-demanding prompt
+  template. Measured ~10x more motion with the loop still closing
+  cleanly.
+
 ## v1.7.2 — 2026-08-07
 - Each section has its own progress bar + percent: the main bar serves
   only the main generation; the Animator and Border maker got dedicated
