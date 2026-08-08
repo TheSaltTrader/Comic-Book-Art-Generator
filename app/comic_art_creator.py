@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -227,6 +227,12 @@ def scan_models(sub):
     return sorted((f.name for f in d.glob("*.safetensors")), key=str.lower)
 
 
+def _ensure_lora_dir():
+    d = MODELS / "loras"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _api_choices(node, field):
     try:
         return api_get(f"/object_info/{node}")[node]["input"]["required"][field][0]
@@ -262,6 +268,22 @@ def check_model_updates():
         return []
     updates, repo_cache = [], {}
     for entry in manifest:
+        # direct-URL entry (e.g. our own trained LoRA on a GitHub release):
+        # size comes from a HEAD request, not the HF blob API
+        if entry.get("url"):
+            local = MODELS / entry["dir"] / entry["local"]
+            size = 0
+            try:
+                h = requests.head(entry["url"], timeout=20,
+                                  allow_redirects=True)
+                size = int(h.headers.get("content-length", 0))
+            except requests.RequestException:
+                pass
+            if not local.exists():
+                updates.append(dict(entry, size=size, missing=True))
+            elif size and local.stat().st_size != size:
+                updates.append(dict(entry, size=size, missing=False))
+            continue
         repo = entry["repo"]
         if repo not in repo_cache:
             try:
@@ -284,8 +306,9 @@ def check_model_updates():
 
 def download_model_update(entry, status_cb, prog_cb=None):
     """Stream one updated model to a temp file, then swap it in place."""
-    url = (f"https://huggingface.co/{entry['repo']}/resolve/main/"
-           f"{entry['remote_file']}")
+    url = entry.get("url") or (
+        f"https://huggingface.co/{entry['repo']}/resolve/main/"
+        f"{entry['remote_file']}")
     dest = MODELS / entry["dir"] / entry["local"]
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
@@ -1519,6 +1542,15 @@ class App:
         lsb.grid(row=0, column=1, sticky="ns")
         self.lora_list.bind("<<ListboxSelect>>",
                             lambda _e: self._schedule_persist())
+        limprow = ttk.Frame(left); limprow.grid(row=r, sticky=NSEW,
+                                                pady=(2, 0)); r += 1
+        ttk.Button(limprow, text="➕ Add LoRA file…",
+                   command=self._import_lora).pack(side="left")
+        ttk.Button(limprow, text="↻", width=3,
+                   command=self._refresh_models).pack(side="left", padx=(4, 0))
+        ttk.Button(limprow, text="📁 LoRA folder",
+                   command=lambda: os.startfile(
+                       str(_ensure_lora_dir()))).pack(side="left", padx=(4, 0))
         strow = ttk.Frame(left); strow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         ttk.Label(strow, text="LoRA strength",
                   style="Dim.TLabel").pack(side="left")
@@ -1882,6 +1914,50 @@ class App:
 
     def _selected_loras(self):
         return [self.lora_list.get(i) for i in self.lora_list.curselection()]
+
+    def _import_lora(self):
+        """Browse for .safetensors LoRA file(s), copy them into
+        models\\loras, then refresh the list and tick the new ones."""
+        paths = filedialog.askopenfilenames(
+            title="Add LoRA file(s)",
+            filetypes=[("LoRA (safetensors)", "*.safetensors"),
+                       ("All files", "*.*")])
+        if not paths:
+            return
+        dest_dir = _ensure_lora_dir()
+        added, skipped = [], []
+        for src in paths:
+            src = Path(src)
+            if src.suffix.lower() != ".safetensors":
+                # .ckpt/.pt are pickle-based and can execute code on load
+                skipped.append(f"{src.name} (only .safetensors is allowed)")
+                continue
+            dest = dest_dir / src.name
+            if dest.exists() and dest.resolve() == src.resolve():
+                added.append(src.name)   # already in the folder
+                continue
+            if dest.exists():
+                if not messagebox.askyesno(
+                        "Replace LoRA",
+                        f"{src.name} is already in your LoRA folder. "
+                        "Replace it?"):
+                    skipped.append(f"{src.name} (kept existing)")
+                    continue
+            try:
+                shutil.copy2(src, dest)
+                added.append(src.name)
+            except OSError as e:
+                skipped.append(f"{src.name} ({e})")
+        # make the freshly added ones tick on the next list rebuild
+        self._pending_loras = getattr(self, "_pending_loras", set()) | set(added)
+        self._refresh_models()
+        parts = []
+        if added:
+            parts.append(f"Added {len(added)} LoRA(s): "
+                         + ", ".join(added))
+        if skipped:
+            parts.append("Skipped: " + "; ".join(skipped))
+        self.status_var.set("  ·  ".join(parts) or "No LoRAs added.")
 
     def _collect_ui_state(self):
         return {

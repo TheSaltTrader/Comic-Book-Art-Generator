@@ -70,6 +70,18 @@ def models_needed():
     needed, repo_cache = [], {}
     for e in entries:
         local = PROJECT / "models" / e["dir"] / e["local"]
+        if e.get("url"):   # direct-URL entry (our own trained LoRA)
+            size = 0
+            try:
+                h = requests.head(e["url"], timeout=20, allow_redirects=True)
+                size = int(h.headers.get("content-length", 0))
+            except requests.RequestException:
+                pass
+            if not local.exists():
+                needed.append(dict(e, size=size))
+            elif size and local.stat().st_size != size:
+                needed.append(dict(e, size=size))
+            continue
         repo = e["repo"]
         if repo not in repo_cache:
             try:
@@ -233,8 +245,9 @@ def _run_install(skip_models, log, status, progress):
         dest = PROJECT / "models" / e["dir"] / e["local"]
         why = "outdated" if dest.exists() else "missing"
         status(f"Downloading model {i}/{len(needed)}: {e['local']} ({why})")
-        url = (f"https://huggingface.co/{e['repo']}/resolve/main/"
-               f"{e['remote_file']}")
+        url = e.get("url") or (
+            f"https://huggingface.co/{e['repo']}/resolve/main/"
+            f"{e['remote_file']}")
         _download(url, dest, f"[{i}/{len(needed)}] {e['local']}", status,
                   adv)
         log(f"[{i}/{len(needed)}] downloaded {e['local']} ({why})")

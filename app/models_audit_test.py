@@ -38,6 +38,14 @@ print(f"constants covered: all {len(required)} referenced files are in "
 
 repo_cache, bad = {}, []
 for e in manifest:
+    if e.get("url"):   # direct-URL entry (our own trained LoRA)
+        try:
+            h = requests.head(e["url"], timeout=20, allow_redirects=True)
+            if not (h.ok and int(h.headers.get("content-length", 0))):
+                bad.append(f"{e['local']} (url {e['url']})")
+        except requests.RequestException:
+            bad.append(f"{e['local']} (url unreachable)")
+        continue
     repo = e["repo"]
     if repo not in repo_cache:
         r = requests.get(
@@ -50,6 +58,8 @@ for e in manifest:
         bad.append(f"{repo}/{e['remote_file']}")
 total = 0
 for e in manifest:
+    if e.get("url"):
+        continue
     sib = next((s for s in repo_cache[e["repo"]]
                 if s.get("rfilename") == e["remote_file"]), None)
     if sib:

@@ -1,5 +1,20 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.1 — 2026-08-08
+- **Trained border LoRA (SDXL_BorderFrames_v1)** — a model trained on a
+  curated bezel-frame collection that teaches the actual concept of a
+  decorative frame (ornamental edges, corner medallions, themed
+  cartouches) instead of drawing a full scene with a hole cut out. The
+  Border maker auto-applies it on SDXL-family models (pick Juggernaut-XL
+  for best results). Downloaded automatically by Setup / the update
+  check.
+- **➕ Add LoRA file…** button under the LoRA list: browse for any
+  `.safetensors` LoRA and it's copied into your LoRA folder, ticked
+  immediately, and loaded automatically on every restart. Plus a
+  **📁 LoRA folder** shortcut to open the folder directly.
+- Model downloads now support direct URLs, so custom-trained models can
+  ship through the same Setup / update pipeline as the HuggingFace ones.
+
 ## v1.10.0 — 2026-08-08
 - Border maker gets its own **Model** and **Style** dropdowns (defaults:
   "Same as main", no style) — pick a different model/style for borders
