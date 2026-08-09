@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.10.2"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1081,32 +1081,80 @@ BORDER_SIZES = {
     "16:9 HD (1920x1080 — best on Flux)": (1920, 1080),
 }
 BORDER_NEGATIVE = ("text, letters, words, numbers, writing, typography, "
-                   "logo, watermark, signature, caption, label, subtitles")
+                   "logo, watermark, signature, caption, label, subtitles, "
+                   "full scene, landscape, scenery in the center, filled "
+                   "center, busy center, background illustration in the "
+                   "middle, picture in the middle, framed painting, "
+                   "content in the center")
 
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
 BORDER_TEMPLATE = (
-    "epic decorative border frame themed after {theme}, filled with "
-    "iconic visual motifs, props, character silhouettes, colors and "
-    "symbols of {theme}, richly detailed frame covering all four edges "
-    "and corners of the image, themed corner ornaments, completely "
-    "textless artwork with no lettering or logos, plain empty solid "
-    "dark center panel, high detail")
+    "an extremely ornate and intricate decorative border frame themed "
+    "after {theme}, elaborate layered ornamentation built from the "
+    "iconic props, character silhouettes, colors and symbols of {theme}, "
+    "richly detailed sculpted frame wrapping all four edges with large "
+    "elaborate corner pieces and themed cartouches, decorative elements "
+    "of varying depth reaching inward from the edges, asymmetric organic "
+    "silhouette, ornate game UI bezel, concept art quality, intricate "
+    "detail, completely textless with no lettering or logos, the middle "
+    "is a plain empty flat solid white panel with absolutely nothing in "
+    "it, empty white center")
 
 
 
 def cut_center(img, thickness_pct):
-    """Make the center of a border/frame image fully transparent, leaving
-    a border of the given thickness (percent of the shorter side)."""
+    """Make the enclosed center of a frame transparent following the
+    frame's REAL inner silhouette — flood-fill the plain middle outward
+    until it meets the frame art, so ornaments that reach inward are
+    kept. Falls back to a soft rectangle when the frame doesn't cleanly
+    enclose a center (so a bad generation never yields worse than before).
+    """
+    import numpy as np
     img = img.convert("RGBA")
     w, h = img.size
-    t = max(8, int(min(w, h) * thickness_pct / 100))
-    mask = Image.new("L", (w, h), 255)
-    ImageDraw.Draw(mask).rectangle((t, t, w - t, h - t), fill=0)
-    mask = mask.filter(ImageFilter.GaussianBlur(1.5))
-    img.putalpha(mask)
-    return img
+    rect_t = max(8, int(min(w, h) * thickness_pct / 100))
+
+    def rect_alpha():
+        m = Image.new("L", (w, h), 255)
+        ImageDraw.Draw(m).rectangle(
+            (rect_t, rect_t, w - rect_t, h - rect_t), fill=0)
+        return m.filter(ImageFilter.GaussianBlur(2))
+
+    try:
+        fill = img.convert("RGB")
+        sent = (255, 0, 255)   # sentinel color for the flooded region
+        cx, cy = w // 2, h // 2
+        seeds = [(cx, cy), (cx, int(h * 0.4)), (cx, int(h * 0.6)),
+                 (int(w * 0.4), cy), (int(w * 0.6), cy)]
+        for s in seeds:
+            ImageDraw.floodfill(fill, s, sent, thresh=42)
+        arr = np.asarray(fill)
+        hole = ((arr[..., 0] == 255) & (arr[..., 1] == 0)
+                & (arr[..., 2] == 255))
+        frac = float(hole.mean())
+        edge_touch = bool(hole[0].any() or hole[-1].any()
+                          or hole[:, 0].any() or hole[:, -1].any())
+        # a real framed center is a big, single, clean empty region. If the
+        # flood found only small/fragmented patches (theme bled into the
+        # middle) fall back to a clean rectangle rather than leave junk.
+        if frac < 0.35 or frac > 0.9 or edge_touch:
+            img.putalpha(rect_alpha())
+            return img
+        alpha = np.where(hole, 0, 255).astype(np.uint8)
+        # guarantee an opaque outer margin so the frame is never eaten
+        m = max(4, rect_t // 2)
+        alpha[:m, :] = 255
+        alpha[-m:, :] = 255
+        alpha[:, :m] = 255
+        alpha[:, -m:] = 255
+        am = Image.fromarray(alpha, "L").filter(ImageFilter.GaussianBlur(2))
+        img.putalpha(am)
+        return img
+    except Exception:
+        img.putalpha(rect_alpha())
+        return img
 
 
 # --------------------------------------------------------------------------
@@ -1173,21 +1221,10 @@ class Generator:
             else:
                 params["edit_image_names"] = [self._upload_ref(rp)
                                               for rp in params["ref_images"]]
-        if params.get("border_cut") and not params.get("edit_image_names"):
-            # prompt-only borders: masked generation keeps the center empty
-            w, h = params["width"], params["height"]
-            # mask is slightly wider than the final cut so the art runs
-            # past the transparency line instead of stopping at it
-            inner = int(min(w, h) * min(45, params["border_cut"] + 5) / 100)
-            bg = Image.new("RGB", (w, h), (8, 8, 10))
-            ImageDraw.Draw(bg).rectangle(
-                (inner, inner, w - inner, h - inner), fill=(8, 8, 10))
-            mask = Image.new("RGB", (w, h), (255, 255, 255))
-            ImageDraw.Draw(mask).rectangle(
-                (inner, inner, w - inner, h - inner), fill=(0, 0, 0))
-            params["border_assets"] = (
-                self._upload_pil(bg, "cbac_border_bg.png"),
-                self._upload_pil(mask, "cbac_border_mask.png"))
+        # prompt-only borders now generate the FULL frame (no restrictive
+        # edge-band mask): the model/LoRA draws a complete ornate frame
+        # with a plain center, and cut_center carves the center transparent
+        # along the frame's real inner silhouette afterwards.
         ws = websocket.WebSocket()
         ws.connect(f"ws://{ENGINE_HOST}:{ENGINE_PORT}/ws?clientId={self.client_id}",
                    timeout=30)
@@ -2266,6 +2303,17 @@ class App:
     def _editor_engine(self):
         return self._editor_display.get(self.editor_var.get(), "kontext")
 
+    def _best_sdxl_model(self):
+        """Best installed SDXL-family checkpoint for the border LoRA —
+        Juggernaut preferred, then any non-Flux model that fits."""
+        ck = list_checkpoints()
+        pref = next((c for c in ck if "juggernaut" in c.lower()), None)
+        if pref and self._model_fits.get(pref, "ok") != "block":
+            return pref
+        return next((c for c in ck
+                     if model_family(c) not in ("flux", "schnell")
+                     and self._model_fits.get(c, "ok") != "block"), None)
+
     def _border_model_raw(self):
         disp = self.border_model_var.get()
         display = getattr(self, "_model_display", {})
@@ -3062,15 +3110,24 @@ class App:
                                               "one in the Border maker or "
                                               "the main controls.")
                 return
+            have_border_lora = BORDER_LORA_FILE in list_loras()
+            # the trained border LoRA is SDXL-only and is what makes a real
+            # frame — if it's installed but the chosen model is Flux, route
+            # the border to the best SDXL checkpoint so the LoRA applies
+            if have_border_lora and model_family(model) in ("flux", "schnell"):
+                sdxl = self._best_sdxl_model()
+                if sdxl:
+                    model = sdxl
+                    self.status_var.set(
+                        f"Border maker using {sdxl} + the trained frame "
+                        "LoRA (Flux can't use it).")
             if self._model_fits.get(model, "ok") == "block":
                 self._vram_block_msg(model)
                 return
             strength = round(self.lora_strength.get(), 2)
             loras = [(n, strength) for n in self._selected_loras()]
-            # the trained border LoRA knows what a frame IS — apply it
-            # automatically on SDXL-family models when installed
-            if model_family(model) not in ("flux", "schnell") and \
-                    BORDER_LORA_FILE in list_loras():
+            if have_border_lora and \
+                    model_family(model) not in ("flux", "schnell"):
                 if BORDER_LORA_FILE not in [n for n, _s in loras]:
                     loras.append((BORDER_LORA_FILE, 0.9))
                 prompt = f"{BORDER_TRIGGER}, " + prompt

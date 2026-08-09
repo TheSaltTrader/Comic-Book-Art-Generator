@@ -1,5 +1,19 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.2 — 2026-08-08
+- **Much better borders.** The Border maker no longer forces generation
+  into a flat rectangular edge band (which produced "a strip at the edge
+  and a rectangle hole"). It now generates a complete ornate frame — like
+  the reference set — and carves the center transparent along the frame's
+  REAL inner silhouette, so ornaments that reach inward are preserved.
+- Border prompt pushes intricate, varying-depth, corner-and-cartouche
+  ornamentation; the negative prompt now fights scene-fill in the center.
+- If a theme still bleeds into the middle, the center falls back to a
+  clean rectangular cut so every border ends up with a usable
+  transparent center.
+- When the trained border LoRA is installed but your model is Flux (which
+  can't use it), the Border maker auto-routes to Juggernaut-XL + the LoRA.
+
 ## v1.10.1 — 2026-08-08
 - **Trained border LoRA (SDXL_BorderFrames_v1)** — a model trained on a
   curated bezel-frame collection that teaches the actual concept of a
