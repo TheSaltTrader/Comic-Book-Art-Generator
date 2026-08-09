@@ -1,5 +1,15 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.4 — 2026-08-09
+- **Auto-clean center (2nd pass).** When a theme puts a character or
+  scene in the middle of a border, the app now automatically runs the
+  frame through Flux Kontext to empty the center — keeping the ornate
+  frame intact — then cuts the transparent center. This fixes the last
+  failure mode (centered figures blocking the cutout). On by default;
+  turns itself off with a note if Kontext isn't installed / won't fit
+  VRAM, and falls back to the original frame if the pass fails. It only
+  runs when the center is actually filled, so clean frames aren't slowed.
+
 ## v1.10.3 — 2026-08-08
 - **Borders now float with a transparent margin** instead of running snug
   to the screen edge, matching the reference bezels.

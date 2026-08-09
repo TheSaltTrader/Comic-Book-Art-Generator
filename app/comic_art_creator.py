@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.10.4"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1090,6 +1090,12 @@ BORDER_NEGATIVE = ("text, letters, words, numbers, writing, typography, "
                    "the middle, large figure in the center, mascot in the "
                    "center, character blocking the center")
 
+BORDER_CLEAN_PROMPT = (
+    "Remove everything inside the frame. The entire center area must "
+    "become plain solid white, completely empty, with no characters, no "
+    "creatures, no objects, no scenery and no text in the middle. Keep "
+    "the decorative border frame around the edges exactly as it is, "
+    "unchanged. Only empty out the center.")
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -1125,6 +1131,41 @@ def _add_margin(img, margin_pct):
     return canvas
 
 
+def _center_hole(img, thresh=70):
+    """Flood the plain central region by its own color and return
+    (hole_bool_array, frac, edge_touch). A clean framed center is a large
+    single void that does not reach the image edges."""
+    import numpy as np
+    w, h = img.size
+    cx, cy = w // 2, h // 2
+    seeds = [(cx, cy), (cx, int(h * 0.35)), (cx, int(h * 0.65)),
+             (int(w * 0.3), cy), (int(w * 0.7), cy),
+             (int(w * 0.4), int(h * 0.4)), (int(w * 0.6), int(h * 0.6))]
+    fill = img.convert("RGB")
+    sent = (255, 0, 255)
+    for s in seeds:
+        try:
+            ImageDraw.floodfill(fill, s, sent, thresh=thresh)
+        except Exception:
+            pass
+    a = np.asarray(fill)
+    hole = ((a[..., 0] == 255) & (a[..., 1] == 0) & (a[..., 2] == 255))
+    frac = float(hole.mean())
+    edge_touch = bool(hole[0].any() or hole[-1].any()
+                      or hole[:, 0].any() or hole[:, -1].any())
+    return hole, frac, edge_touch
+
+
+def border_center_clean(img):
+    """True when the frame already has a large, clean, enclosed empty
+    center (so no second Kontext clean-up pass is needed)."""
+    try:
+        _hole, frac, edge_touch = _center_hole(img.convert("RGBA"))
+        return 0.30 < frac < 0.9 and not edge_touch
+    except Exception:
+        return True   # never block generation on a detection hiccup
+
+
 def cut_center(img, thickness_pct, margin_pct=6):
     """Turn a frame render into a floating transparent-background bezel.
 
@@ -1141,11 +1182,6 @@ def cut_center(img, thickness_pct, margin_pct=6):
     img = img.convert("RGBA")
     w, h = img.size
     rect_t = max(8, int(min(w, h) * thickness_pct / 100))
-    cx, cy = w // 2, h // 2
-    center_seeds = [(cx, cy), (cx, int(h * 0.35)), (cx, int(h * 0.65)),
-                    (int(w * 0.3), cy), (int(w * 0.7), cy),
-                    (int(w * 0.4), int(h * 0.4)),
-                    (int(w * 0.6), int(h * 0.6))]
 
     def rect_alpha():
         m = Image.new("L", (w, h), 255)
@@ -1153,24 +1189,10 @@ def cut_center(img, thickness_pct, margin_pct=6):
             (rect_t, rect_t, w - rect_t, h - rect_t), fill=0)
         return m.filter(ImageFilter.GaussianBlur(2))
 
-    def flood(thresh):
-        fill = img.convert("RGB")
-        sent = (255, 0, 255)
-        for s in center_seeds:
-            try:
-                ImageDraw.floodfill(fill, s, sent, thresh=thresh)
-            except Exception:
-                pass
-        a = np.asarray(fill)
-        return ((a[..., 0] == 255) & (a[..., 1] == 0) & (a[..., 2] == 255))
-
     try:
         # generous threshold keys the plain center whatever its shade,
         # following its organic outline; must be a real central void
-        hole = flood(70)
-        frac = float(hole.mean())
-        edge_touch = bool(hole[0].any() or hole[-1].any()
-                          or hole[:, 0].any() or hole[:, -1].any())
+        hole, frac, edge_touch = _center_hole(img, 70)
         if 0.18 < frac < 0.9 and not edge_touch:
             alpha = np.where(hole, 0, 255).astype(np.uint8)
             # never eat the outermost frame pixels
@@ -1293,10 +1315,41 @@ class Generator:
                 images = self._await_images(ws, prompt_id)
                 for img_meta in images:
                     img = self._fetch_image(img_meta)
+                    if params.get("border_clean") \
+                            and not params.get("edit_image_names") \
+                            and not border_center_clean(img):
+                        img = self._clean_border_center(ws, img, p)
                     self.q.put(("image", img, p))
             self.q.put(("done", None))
         finally:
             ws.close()
+
+    def _clean_border_center(self, ws, img, p):
+        """Second pass: the frame came out with content in the middle —
+        run it through Flux Kontext to empty the center, keeping the
+        frame. Returns the cleaned image, or the original on any failure
+        so a border is never lost to the clean-up step."""
+        try:
+            self.q.put(("status", "Cleaning the center (2nd pass, "
+                                  "Flux Kontext)…"))
+            name = self._upload_pil(img.convert("RGB"),
+                                    "cbac_border_pre.png")
+            cp = dict(p, prompt=BORDER_CLEAN_PROMPT,
+                      edit_image_names=[name], editor="kontext",
+                      out_size=(img.width, img.height), steps=20)
+            graph = build_kontext_graph(cp)
+            r = requests.post(f"{ENGINE_URL}/prompt",
+                              json={"prompt": graph,
+                                    "client_id": self.client_id},
+                              timeout=30)
+            r.raise_for_status()
+            cleaned = self._await_images(ws, r.json()["prompt_id"])
+            if cleaned:
+                return self._fetch_image(cleaned[0])
+        except Exception as e:
+            self.q.put(("status", f"Center clean-up skipped ({e}); using "
+                                  "the original frame."))
+        return img
 
     def _upload_pil(self, img, name):
         buf = BytesIO()
@@ -1891,6 +1944,11 @@ class App:
         self.border_thick_var.trace_add(
             "write", lambda *_a: self.border_thick_lab.config(
                 text=f"{int(self.border_thick_var.get())}%"))
+        self.border_clean_var = BooleanVar(value=True)
+        ttk.Checkbutton(left, text="Auto-clean center (2nd pass with Flux "
+                                   "Kontext when a theme fills the middle)",
+                        variable=self.border_clean_var).grid(
+            row=r, sticky=W, pady=(2, 0)); r += 1
         ttk.Button(left, text="⚡ Generate border",
                    command=self._generate_border).grid(row=r, sticky="ew",
                                                        pady=(4, 2)); r += 1
@@ -2056,6 +2114,7 @@ class App:
             "border_style": self.border_style_var.get(),
             "border_aspect": self.border_aspect_var.get(),
             "border_thick": int(self.border_thick_var.get()),
+            "border_clean": self.border_clean_var.get(),
             "size": self.size_var.get(),
             "steps": self.steps_var.get(),
             "batch": self.batch_var.get(),
@@ -2131,6 +2190,7 @@ class App:
             if st.get("border_aspect") in BORDER_SIZES:
                 self.border_aspect_var.set(st["border_aspect"])
             self.border_thick_var.set(st.get("border_thick", 14))
+            self.border_clean_var.set(st.get("border_clean", True))
             if st.get("size") in SIZE_PRESETS:
                 self.size_var.set(st["size"])
             self.steps_var.set(st.get("steps", "auto"))
@@ -2156,7 +2216,8 @@ class App:
                     self.editor_canvas_var,
                     self.border_auto_var, self.border_aspect_var,
                     self.border_model_var, self.border_style_var,
-                    self.border_thick_var, self.anim_secs_var,
+                    self.border_thick_var, self.border_clean_var,
+                    self.anim_secs_var,
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
                     self.anim_motion_var, self.anim_gif_var,
@@ -3165,6 +3226,13 @@ class App:
             else int(self.seed_var.get() or 0)
         steps = None if self.steps_var.get() == "auto" \
             else int(self.steps_var.get())
+        # 2nd-pass center clean-up needs Kontext installed and fitting VRAM
+        clean = bool(self.border_clean_var.get() and not refs
+                     and not self._editor_missing("kontext")
+                     and self._editor_tier("kontext") != "block")
+        if self.border_clean_var.get() and not refs and not clean:
+            self.status_var.set("Auto-clean center off: Flux Kontext isn't "
+                                "installed or won't fit VRAM.")
         params = dict(
             prompt=prompt, user_prompt=theme, style="border frame",
             negative=BORDER_NEGATIVE, model=model, loras=loras,
@@ -3173,6 +3241,7 @@ class App:
             random_seed=self.random_seed_var.get(),
             transparent=False, preset="border maker",
             border_cut=int(self.border_thick_var.get()),
+            border_clean=clean,
             ref_images=refs, editor=editor,
             ref_collage_size=(w, h) if refs else None,
             out_size=(w, h) if refs else None)
