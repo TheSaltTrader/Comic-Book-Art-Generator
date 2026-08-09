@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1794,16 +1794,30 @@ class App:
         s.map("TCheckbutton", background=[("active", BG)])
         s.configure("TRadiobutton", background=BG, foreground=FG)
         s.map("TRadiobutton", background=[("active", BG)])
-        s.configure("TCombobox", padding=4)
-        s.configure("Fit.TCombobox", padding=4, foreground=ACCENT2)
-        s.map("Fit.TCombobox", fieldbackground=[("readonly", BG3)],
-              foreground=[("readonly", ACCENT2)])
-        s.configure("Warn.TCombobox", padding=4, foreground="#e74c3c")
-        s.map("Warn.TCombobox", fieldbackground=[("readonly", BG3)],
-              foreground=[("readonly", "#e74c3c")])
-        s.configure("NoFit.TCombobox", padding=4, foreground="#77778a")
-        s.map("NoFit.TCombobox", fieldbackground=[("readonly", BG3)],
-              foreground=[("readonly", "#77778a")])
+        # readonly comboboxes must show their saved value in a readable
+        # colour in EVERY state (readonly, focused, hovered) — otherwise
+        # the selected text renders in default colours that vanish against
+        # the dark field and the box looks empty until you click it.
+        s.configure("TCombobox", padding=4, foreground=FG,
+                    fieldbackground=BG3, background=BG3,
+                    selectbackground=BG3, selectforeground=FG)
+        s.map("TCombobox",
+              fieldbackground=[("readonly", BG3), ("focus", BG3)],
+              foreground=[("readonly", FG), ("focus", FG),
+                          ("disabled", FG_DIM)],
+              selectbackground=[("readonly", BG3), ("focus", BG3)],
+              selectforeground=[("readonly", FG), ("focus", FG)],
+              background=[("readonly", BG3)])
+        for name, col in (("Fit", ACCENT2), ("Warn", "#e74c3c"),
+                          ("NoFit", "#77778a")):
+            s.configure(f"{name}.TCombobox", padding=4, foreground=col,
+                        fieldbackground=BG3, selectbackground=BG3,
+                        selectforeground=col)
+            s.map(f"{name}.TCombobox",
+                  fieldbackground=[("readonly", BG3), ("focus", BG3)],
+                  foreground=[("readonly", col), ("focus", col)],
+                  selectbackground=[("readonly", BG3), ("focus", BG3)],
+                  selectforeground=[("readonly", col), ("focus", col)])
         s.configure("Horizontal.TProgressbar", background=ACCENT2,
                     troughcolor=BG2)
         s.configure("TSpinbox", padding=4)

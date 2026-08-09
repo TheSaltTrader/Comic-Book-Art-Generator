@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.11.1 — 2026-08-09
+- Dropdowns now show their saved selection in readable text at all times.
+  Previously most readonly dropdowns (aspect, size, keep, loop, motion,
+  editor, presets, border model/style, video) rendered their value in a
+  colour that vanished against the dark field, so they looked empty until
+  clicked. Fixed the base combobox style to keep light text on the dark
+  field in every state.
+
 ## v1.11.0 — 2026-08-09
 Major feature release — six additions:
 - **Hi-res upscaling.** New "Upscale 4x" toggle runs generations and
