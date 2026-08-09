@@ -1,5 +1,23 @@
 # Changelog — Comic Book Art Creator
 
+## v1.11.0 — 2026-08-09
+Major feature release — six additions:
+- **Hi-res upscaling.** New "Upscale 4x" toggle runs generations and
+  borders through a RealESRGAN pass for print/4K-quality output
+  (downloaded automatically by Setup / the update check).
+- **In-app LoRA training.** "🎓 Train LoRA…" trains a style LoRA from your
+  training set on your GPU, then installs it automatically. First use
+  sets up the training toolkit (needs git + Python 3.10-3.12; one time).
+- **Animator video + sprite sheets.** Export animations as MP4 or WebM
+  (self-contained, no install needed) and/or a packed sprite-sheet PNG
+  with a JSON atlas for game engines — alongside the existing GIF.
+- **Batch queue.** ＋Q next to each Generate button adds the current
+  settings as a job; "Run all" processes the whole batch unattended.
+- **App self-updater.** On launch the app offers to download and install
+  a newer release itself — no manual exe swapping.
+- **Single-instance guard.** Warns if a second copy is opened and if a
+  foreign engine already holds the port, preventing lost results.
+
 ## v1.10.5 — 2026-08-09
 - The LoRA list now shows only the **current** border-frame LoRA;
   superseded versions (e.g. an older SDXL_BorderFrames_v#) are hidden so

@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.5"
+APP_VERSION = "1.11.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -65,6 +65,9 @@ def engine_python():
 MODELS = PROJECT / "models"
 OUTPUT = PROJECT / "output"
 RAW_OUT = OUTPUT / "_raw"
+TRAIN_DIR = PROJECT / "training"
+TRAINVENV_PY = TRAIN_DIR / "trainvenv" / "Scripts" / "python.exe"
+SDSCRIPTS_DIR = TRAIN_DIR / "sd-scripts"
 SETTINGS_FILE = APP_DIR / "settings.json"
 PRESETS_FILE = APP_DIR / "presets.json"
 MANIFEST_FILE = APP_DIR / "models_manifest.json"
@@ -79,6 +82,8 @@ def _contained_env():
     env["PIP_NO_CACHE_DIR"] = "1"
     return env
 
+
+UPSCALE_MODEL = "RealESRGAN_x4plus.pth"   # optional 4x hi-res pass
 
 ENGINE_HOST = "127.0.0.1"   # loopback only — engine is never exposed to LAN
 ENGINE_PORT = 8188
@@ -207,6 +212,108 @@ def start_engine():
     subprocess.Popen(cmd, cwd=str(ENGINE_DIR), stdout=log,
                      stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
                      env=_contained_env())
+    _mark_engine_owned()
+
+
+ENGINE_OWNER_FILE = PROJECT / "engine_owner.json"
+
+
+def _mark_engine_owned():
+    """Record that THIS process started the engine, so a later boot can
+    tell its own engine from a stray one left by another instance."""
+    try:
+        ENGINE_OWNER_FILE.write_text(
+            json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def engine_is_ours():
+    """True if the live engine was started by a process that is still us
+    or still running (our marker pid). A foreign/stale engine returns
+    False so the caller can warn or restart it."""
+    try:
+        pid = json.loads(ENGINE_OWNER_FILE.read_text(encoding="utf-8"))["pid"]
+    except (OSError, ValueError, KeyError):
+        return False
+    if pid == os.getpid():
+        return True
+    # is that pid still alive? (Windows tasklist check, no extra deps)
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True, creationflags=NO_WINDOW,
+            timeout=5).stdout
+        return str(pid) in out
+    except Exception:
+        return False
+
+
+def training_toolkit_ready():
+    """True when the kohya training toolkit (venv + sd-scripts) is set up
+    in the project's training folder."""
+    return TRAINVENV_PY.exists() and \
+        (SDSCRIPTS_DIR / "sdxl_train_network.py").exists()
+
+
+def _find_system_python():
+    """A real Python 3.10-3.12 to build the training venv (the app's
+    embedded runtime can't create venvs). Returns a command list or None."""
+    for cand in (["py", "-3.12"], ["py", "-3.11"], ["py", "-3.10"],
+                 ["python"]):
+        try:
+            r = subprocess.run(cand + ["--version"], capture_output=True,
+                               text=True, creationflags=NO_WINDOW, timeout=10)
+            if r.returncode == 0 and "3.1" in (r.stdout + r.stderr):
+                return cand
+        except Exception:
+            continue
+    return None
+
+
+def install_training_toolkit(status_cb):
+    """One-time setup: clone kohya sd-scripts and build a training venv
+    with CUDA torch. Needs git + a system Python 3.10-3.12 + internet."""
+    py = _find_system_python()
+    if not py:
+        raise RuntimeError("Python 3.10-3.12 is required to set up training "
+                           "(install it from python.org, then retry).")
+    TRAIN_DIR.mkdir(parents=True, exist_ok=True)
+    if not (SDSCRIPTS_DIR / "sdxl_train_network.py").exists():
+        status_cb("Cloning the training scripts…")
+        subprocess.run(["git", "clone", "--depth", "1",
+                        "https://github.com/kohya-ss/sd-scripts.git",
+                        str(SDSCRIPTS_DIR)], check=True,
+                       creationflags=NO_WINDOW, timeout=600)
+    if not TRAINVENV_PY.exists():
+        status_cb("Creating the training environment…")
+        subprocess.run(py + ["-m", "venv", str(TRAIN_DIR / "trainvenv")],
+                       check=True, creationflags=NO_WINDOW, timeout=300)
+    status_cb("Installing PyTorch (CUDA) — several GB, one time…")
+    subprocess.run([str(TRAINVENV_PY), "-m", "pip", "install", "--quiet",
+                    "torch", "torchvision", "--index-url",
+                    "https://download.pytorch.org/whl/cu128"], check=True,
+                   creationflags=NO_WINDOW, timeout=3600)
+    status_cb("Installing training requirements…")
+    subprocess.run([str(TRAINVENV_PY), "-m", "pip", "install", "--quiet",
+                    "-r", str(SDSCRIPTS_DIR / "requirements.txt")],
+                   cwd=str(SDSCRIPTS_DIR), check=True,
+                   creationflags=NO_WINDOW, timeout=1800)
+    status_cb("Training toolkit ready.")
+
+
+def single_instance_handle():
+    """Windows named mutex: returns (handle, already_running). Keep the
+    handle alive for the process lifetime; None on non-Windows."""
+    if os.name != "nt":
+        return None, False
+    try:
+        h = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "Global\\ComicBookArtCreator_singleton")
+        already = ctypes.windll.kernel32.GetLastError() == 183  # ALREADY_EXISTS
+        return h, already
+    except Exception:
+        return None, False
 
 
 def api_get(path):
@@ -401,6 +508,75 @@ def check_engine_update():
             pass
         return None
     return {"sha": sha} if sha != local else None
+
+
+APP_RELEASES_API = ("https://api.github.com/repos/TheSaltTrader/"
+                    "Comic-Book-Art-Generator/releases/latest")
+
+
+def _version_tuple(v):
+    nums = re.findall(r"\d+", v or "")
+    return tuple(int(n) for n in nums[:4]) if nums else (0,)
+
+
+def check_app_update():
+    """Return {'tag','zip_url'} when GitHub's latest release is newer than
+    this running build, else None. Only meaningful for the frozen exe."""
+    try:
+        r = requests.get(APP_RELEASES_API, timeout=20,
+                         headers={"Accept": "application/vnd.github+json"})
+        if not r.ok:
+            return None
+        j = r.json()
+        tag = j.get("tag_name", "")
+        if _version_tuple(tag) <= _version_tuple(APP_VERSION):
+            return None
+        zurl = next((a["browser_download_url"] for a in j.get("assets", [])
+                     if a.get("name", "").lower().endswith(".zip")), None)
+        return {"tag": tag, "zip_url": zurl} if zurl else None
+    except Exception:
+        return None
+
+
+def apply_app_update(zip_url, status_cb):
+    """Download the release zip, extract the exe(s), and swap them in.
+    Renames the running exe aside (Windows can't overwrite a running exe),
+    copies the new one in, and returns the path to relaunch."""
+    tmp = PROJECT / "_app_upd_tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    zpath = tmp / "release.zip"
+    status_cb("Downloading the new version…")
+    with requests.get(zip_url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(zpath, "wb") as fh:
+            for chunk in r.iter_content(1 << 20):
+                fh.write(chunk)
+    status_cb("Unpacking…")
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(tmp)
+    new_app = next(tmp.rglob("ComicArtCreator.exe"), None)
+    new_setup = next(tmp.rglob("Setup.exe"), None)
+    if not new_app:
+        raise RuntimeError("the release zip has no ComicArtCreator.exe")
+    for cur, new in ((PROJECT / "ComicArtCreator.exe", new_app),
+                     (PROJECT / "Setup.exe", new_setup)):
+        if not new:
+            continue
+        try:
+            if cur.exists():
+                old = cur.with_name(cur.stem + "_old_"
+                                    + str(os.getpid()) + ".exe")
+                try:
+                    old.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                os.replace(cur, old)
+            shutil.copy2(new, cur)
+        except OSError as e:
+            raise RuntimeError(f"could not replace {cur.name}: {e}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    return PROJECT / "ComicArtCreator.exe"
 
 
 def kill_engine():
@@ -962,6 +1138,55 @@ def save_gif(frames, path, fps, transparent):
                     duration=dur, loop=0)
 
 
+def save_video(frames, path, fps, webm=False, bg=(20, 20, 26)):
+    """Encode frames to MP4 (h264) or WebM (vp9) via PyAV — self-contained
+    (PyAV ships its own ffmpeg, so no external install). Video can't carry
+    transparency, so RGBA frames are composited on a solid background;
+    the GIF/sprite-sheet keep the alpha."""
+    import av
+    import numpy as np
+    w, h = frames[0].size
+    w -= w % 2
+    h -= h % 2   # h264/vp9 need even dimensions
+    container = av.open(str(path), mode="w")
+    codec = "libvpx-vp9" if webm else "libx264"
+    stream = container.add_stream(codec, rate=int(round(fps)))
+    stream.width, stream.height = w, h
+    stream.pix_fmt = "yuv420p"
+    if not webm:
+        stream.options = {"crf": "18", "preset": "medium"}
+    try:
+        for f in frames:
+            flat = Image.new("RGB", (w, h), bg)
+            rgba = f.convert("RGBA").resize((w, h), Image.LANCZOS)
+            flat.paste(rgba, (0, 0), rgba)
+            vf = av.VideoFrame.from_ndarray(np.asarray(flat), format="rgb24")
+            for pkt in stream.encode(vf):
+                container.mux(pkt)
+        for pkt in stream.encode():
+            container.mux(pkt)
+    finally:
+        container.close()
+
+
+def save_sprite_sheet(frames, png_path, json_path, fps):
+    """Pack frames into a single grid PNG (alpha preserved) with a JSON
+    atlas describing the layout — drop-in for game engines/frontends."""
+    import json as _json
+    import math
+    n = len(frames)
+    fw, fh = frames[0].size
+    cols = int(math.ceil(math.sqrt(n)))
+    rows = int(math.ceil(n / cols))
+    sheet = Image.new("RGBA", (cols * fw, rows * fh), (0, 0, 0, 0))
+    for i, f in enumerate(frames):
+        sheet.paste(f.convert("RGBA"), ((i % cols) * fw, (i // cols) * fh))
+    sheet.save(png_path)
+    _json.dump({"frame_width": fw, "frame_height": fh, "columns": cols,
+                "rows": rows, "frame_count": n, "fps": int(round(fps))},
+               open(json_path, "w", encoding="utf-8"), indent=2)
+
+
 def build_graph(p):
     """Build a ComfyUI prompt graph from generation params dict."""
     if p.get("edit_image_names"):
@@ -1071,8 +1296,16 @@ def build_graph(p):
                          "denoise": denoise}}
     g["7"] = {"class_type": "VAEDecode",
               "inputs": {"samples": ["6", 0], "vae": ["1", 2]}}
+    img_out = ["7", 0]
+    # optional hi-res pass: run the decoded image through a 4x upscale model
+    if p.get("upscale") and (MODELS / "upscale_models" / UPSCALE_MODEL).exists():
+        g["40"] = {"class_type": "UpscaleModelLoader",
+                   "inputs": {"model_name": UPSCALE_MODEL}}
+        g["41"] = {"class_type": "ImageUpscaleWithModel",
+                   "inputs": {"upscale_model": ["40", 0], "image": img_out}}
+        img_out = ["41", 0]
     g["8"] = {"class_type": "SaveImage",
-              "inputs": {"filename_prefix": "cbac", "images": ["7", 0]}}
+              "inputs": {"filename_prefix": "cbac", "images": img_out}}
     return g
 
 
@@ -1463,6 +1696,8 @@ class App:
         self.session = []          # list of (PIL image, params, path)
         self.current = None        # index into session
         self.busy = False
+        self.job_queue = []        # batch queue of pending jobs
+        self._batch_active = False
         self._auto_negative = None  # last negative set by a preset (vs typed)
         self._model_display = {}    # "name · 6.5 GB" -> raw filename
         self._pending_loras = set()
@@ -1739,6 +1974,10 @@ class App:
         self.transparent_var = BooleanVar(value=False)
         ttk.Checkbutton(grow, text="Transparent BG",
                         variable=self.transparent_var).grid(row=0, column=4)
+        self.upscale_var = BooleanVar(value=False)
+        ttk.Checkbutton(grow, text="Upscale 4x (hi-res)",
+                        variable=self.upscale_var).grid(row=0, column=5,
+                                                        padx=(12, 0))
 
         seedrow = ttk.Frame(left); seedrow.grid(row=r, sticky=NSEW, pady=4); r += 1
         ttk.Label(seedrow, text="Seed", style="Dim.TLabel").grid(row=0, column=0)
@@ -1794,9 +2033,15 @@ class App:
         self.change_var = DoubleVar(value=60)   # border-ref influence
 
         # generate
-        self.go_btn = ttk.Button(left, text="⚡  GENERATE", style="Go.TButton",
+        gorow = ttk.Frame(left); gorow.grid(row=r, sticky=NSEW,
+                                            pady=(12, 4)); r += 1
+        gorow.columnconfigure(0, weight=1)
+        self.go_btn = ttk.Button(gorow, text="⚡  GENERATE", style="Go.TButton",
                                  command=self._generate)
-        self.go_btn.grid(row=r, sticky=NSEW, pady=(12, 4)); r += 1
+        self.go_btn.grid(row=0, column=0, sticky=NSEW)
+        ttk.Button(gorow, text="＋Q", width=4,
+                   command=lambda: self._generate(queue=True)).grid(
+            row=0, column=1, padx=(4, 0))
         pbrow = ttk.Frame(left); pbrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         pbrow.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(pbrow, mode="determinate")
@@ -1885,9 +2130,25 @@ class App:
         ttk.Checkbutton(a4, text="Zip folder",
                         variable=self.anim_zip_var).pack(side="left",
                                                          padx=(12, 0))
-        ttk.Button(left, text="🎬 Generate animation",
-                   command=self._generate_animation).grid(
-            row=r, sticky="ew", pady=(4, 2)); r += 1
+        a5 = ttk.Frame(left); a5.grid(row=r, sticky=NSEW, pady=(0, 2)); r += 1
+        self.anim_sheet_var = BooleanVar(value=False)
+        ttk.Checkbutton(a5, text="Sprite sheet",
+                        variable=self.anim_sheet_var).pack(side="left")
+        self.anim_video_var = StringVar(value="none")
+        ttk.Label(a5, text="Video", style="Dim.TLabel").pack(side="left",
+                                                             padx=(12, 2))
+        ttk.Combobox(a5, textvariable=self.anim_video_var, state="readonly",
+                     exportselection=False,
+                     values=["none", "MP4", "WebM"], width=7).pack(side="left")
+        anrow = ttk.Frame(left); anrow.grid(row=r, sticky=NSEW,
+                                            pady=(4, 2)); r += 1
+        anrow.columnconfigure(0, weight=1)
+        ttk.Button(anrow, text="🎬 Generate animation",
+                   command=self._generate_animation).grid(row=0, column=0,
+                                                          sticky="ew")
+        ttk.Button(anrow, text="＋Q", width=4,
+                   command=lambda: self._generate_animation(queue=True)).grid(
+            row=0, column=1, padx=(4, 0))
         apb = ttk.Frame(left); apb.grid(row=r, sticky=NSEW, pady=(0, 8)); r += 1
         apb.columnconfigure(0, weight=1)
         self.anim_progress = ttk.Progressbar(apb, mode="determinate")
@@ -1978,9 +2239,15 @@ class App:
                                    "Kontext when a theme fills the middle)",
                         variable=self.border_clean_var).grid(
             row=r, sticky=W, pady=(2, 0)); r += 1
-        ttk.Button(left, text="⚡ Generate border",
-                   command=self._generate_border).grid(row=r, sticky="ew",
-                                                       pady=(4, 2)); r += 1
+        borow = ttk.Frame(left); borow.grid(row=r, sticky=NSEW,
+                                            pady=(4, 2)); r += 1
+        borow.columnconfigure(0, weight=1)
+        ttk.Button(borow, text="⚡ Generate border",
+                   command=self._generate_border).grid(row=0, column=0,
+                                                       sticky="ew")
+        ttk.Button(borow, text="＋Q", width=4,
+                   command=lambda: self._generate_border(queue=True)).grid(
+            row=0, column=1, padx=(4, 0))
         bpb = ttk.Frame(left); bpb.grid(row=r, sticky=NSEW, pady=(0, 8)); r += 1
         bpb.columnconfigure(0, weight=1)
         self.border_progress = ttk.Progressbar(bpb, mode="determinate")
@@ -1991,6 +2258,36 @@ class App:
         ttk.Button(bpb, text="✕ Cancel", width=9,
                    command=self._cancel_generation).grid(row=0, column=2,
                                                          padx=(4, 0))
+
+        # ---------- batch queue (very bottom) ----------
+        self.queue_count_var = StringVar(value="Batch queue (0)")
+        ttk.Label(left, textvariable=self.queue_count_var,
+                  style="Head.TLabel").grid(row=r, sticky=W,
+                                            pady=(14, 0)); r += 1
+        ttk.Label(left, text="Use ＋Q next to any Generate button to add the "
+                             "current settings as a job, then Run all.",
+                  style="Dim.TLabel", wraplength=400,
+                  justify="left").grid(row=r, sticky=W); r += 1
+        qframe = ttk.Frame(left); qframe.grid(row=r, sticky=NSEW, pady=2)
+        r += 1
+        qframe.columnconfigure(0, weight=1)
+        self.queue_list = Listbox(qframe, selectmode="extended", height=4,
+                                  bg=BG3, fg=FG, relief="flat",
+                                  highlightthickness=0, activestyle="none",
+                                  exportselection=False, font=("Segoe UI", 9))
+        self.queue_list.grid(row=0, column=0, sticky="ew")
+        qsb = ttk.Scrollbar(qframe, orient="vertical",
+                            command=self.queue_list.yview)
+        self.queue_list.configure(yscrollcommand=qsb.set)
+        qsb.grid(row=0, column=1, sticky="ns")
+        qbtns = ttk.Frame(left); qbtns.grid(row=r, sticky=NSEW,
+                                            pady=(2, 8)); r += 1
+        ttk.Button(qbtns, text="▶ Run all",
+                   command=self._run_queue).pack(side="left")
+        ttk.Button(qbtns, text="Remove",
+                   command=self._remove_queued).pack(side="left", padx=6)
+        ttk.Button(qbtns, text="Clear",
+                   command=self._clear_queue).pack(side="left")
 
         # ---------- right column: preview + gallery ----------
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
@@ -2024,6 +2321,8 @@ class App:
                    command=self._civitai_dialog).pack(side="left", padx=6)
         ttk.Button(brow, text="⭐ Add to training set",
                    command=self._add_to_training).pack(side="left", padx=6)
+        ttk.Button(brow, text="🎓 Train LoRA…",
+                   command=self._train_lora_dialog).pack(side="left", padx=6)
         self.info_var = StringVar(value="")
         ttk.Label(brow, textvariable=self.info_var,
                   style="Dim.TLabel").pack(side="right")
@@ -2137,6 +2436,8 @@ class App:
             "anim_motion": self.anim_motion_var.get(),
             "anim_gif": self.anim_gif_var.get(),
             "anim_zip": self.anim_zip_var.get(),
+            "anim_sheet": self.anim_sheet_var.get(),
+            "anim_video": self.anim_video_var.get(),
             "border_theme": self._get(self.border_prompt_box),
             "border_auto": self.border_auto_var.get(),
             "border_model": self.border_model_var.get(),
@@ -2148,6 +2449,7 @@ class App:
             "steps": self.steps_var.get(),
             "batch": self.batch_var.get(),
             "transparent": self.transparent_var.get(),
+            "upscale": self.upscale_var.get(),
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
             "auto_negative": self._auto_negative,
@@ -2210,6 +2512,9 @@ class App:
                 self.anim_motion_var.set(st["anim_motion"])
             self.anim_gif_var.set(st.get("anim_gif", True))
             self.anim_zip_var.set(st.get("anim_zip", True))
+            self.anim_sheet_var.set(st.get("anim_sheet", False))
+            if st.get("anim_video") in ("none", "MP4", "WebM"):
+                self.anim_video_var.set(st["anim_video"])
             self._set(self.border_prompt_box, st.get("border_theme", ""))
             self.border_auto_var.set(st.get("border_auto", True))
             if st.get("border_model"):
@@ -2225,6 +2530,7 @@ class App:
             self.steps_var.set(st.get("steps", "auto"))
             self.batch_var.set(st.get("batch", 1))
             self.transparent_var.set(st.get("transparent", False))
+            self.upscale_var.set(st.get("upscale", False))
             self.seed_var.set(st.get("seed", "0"))
             self.random_seed_var.set(st.get("random_seed", True))
             self._auto_negative = st.get("auto_negative")
@@ -2240,7 +2546,8 @@ class App:
         survive any kind of exit — including a killed process."""
         for var in (self.model_var, self.preset_var, self.size_var,
                     self.steps_var, self.seed_var, self.batch_var,
-                    self.transparent_var, self.random_seed_var,
+                    self.transparent_var, self.upscale_var,
+                    self.random_seed_var,
                     self.lora_strength, self.change_var, self.editor_var,
                     self.editor_canvas_var,
                     self.border_auto_var, self.border_aspect_var,
@@ -2250,7 +2557,8 @@ class App:
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
                     self.anim_motion_var, self.anim_gif_var,
-                    self.anim_zip_var):
+                    self.anim_zip_var, self.anim_sheet_var,
+                    self.anim_video_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box, self.anim_prompt_box):
@@ -2299,10 +2607,29 @@ class App:
                     os.replace(tmp, dest)
                 except OSError:
                     pass
+        # app self-update (frozen exe only) — offer before model/engine
+        if getattr(sys, "frozen", False):
+            app_up = check_app_update()
+            if app_up:
+                self.ui_queue.put(("app_update", app_up))
         ups = check_model_updates()
         eng = check_engine_update()
         if ups or eng:
             self.ui_queue.put(("updates", ups, eng))
+
+    def _do_app_update(self, info):
+        try:
+            newexe = apply_app_update(
+                info["zip_url"],
+                lambda s: self.ui_queue.put(("status", s)))
+            self.ui_queue.put(("status", f"Updated to {info['tag']}. "
+                                         "Restarting…"))
+            subprocess.Popen([str(newexe)], cwd=str(PROJECT))
+            self.root.after(800, self.root.destroy)
+        except Exception as e:
+            self.ui_queue.put(("error", f"App update failed: {e}. You can "
+                                        "download the latest release "
+                                        "manually from GitHub."))
 
     def _download_updates(self, ups, eng=None):
         ok, locked = 0, 0
@@ -2344,6 +2671,14 @@ class App:
         self._boot_engine()
 
     def _boot_engine(self):
+        if engine_alive() and not engine_is_ours():
+            # a foreign engine (another instance / leftover dev run) holds
+            # the port — using it can send results to the wrong window
+            self.ui_queue.put(("status", "Note: an engine was already "
+                                         "running on port 8188 (another "
+                                         "instance or a previous session). "
+                                         "Using it — close extra windows if "
+                                         "results seem to go missing."))
         if not engine_alive():
             self.ui_queue.put(("status", "Starting local engine (first start "
                                          "takes a minute)…"))
@@ -2706,9 +3041,78 @@ class App:
         self.border_ref_var.set("none")
         self._schedule_persist()
 
+    # -------------------------------------------------- batch queue
+    def _enqueue(self, kind, label, payload):
+        self.job_queue.append({"kind": kind, "label": label,
+                               "payload": payload})
+        self._refresh_queue()
+        self.status_var.set(f"Queued: {label}  ({len(self.job_queue)} in "
+                            "batch). Add more, then Run all.")
+
+    def _refresh_queue(self):
+        if not hasattr(self, "queue_list"):
+            return
+        self.queue_list.delete(0, END)
+        for j in self.job_queue:
+            self.queue_list.insert(END, f"[{j['kind']}] {j['label']}")
+        self.queue_count_var.set(f"Batch queue ({len(self.job_queue)})")
+
+    def _remove_queued(self):
+        sel = list(self.queue_list.curselection())
+        for i in reversed(sel):
+            if 0 <= i < len(self.job_queue):
+                del self.job_queue[i]
+        self._refresh_queue()
+
+    def _clear_queue(self):
+        self.job_queue = []
+        self._refresh_queue()
+
+    def _run_queue(self):
+        if getattr(self, "_batch_active", False):
+            return
+        if not self.job_queue:
+            self.status_var.set("Batch queue is empty — use the ＋Q buttons "
+                                "to add jobs.")
+            return
+        if self.busy and self._busy_guard():
+            return
+        self._batch_active = True
+        self.busy = True
+        self.go_btn.state(["disabled"])
+        threading.Thread(target=self._queue_worker, daemon=True).start()
+
+    def _queue_worker(self):
+        jobs = list(self.job_queue)
+        total = len(jobs)
+        try:
+            for i, j in enumerate(jobs, 1):
+                self.ui_queue.put(("status", f"Batch {i}/{total}: "
+                                             f"{j['label']}…"))
+                try:
+                    if j["kind"] == "gen":
+                        Generator(self.ui_queue).run(j["payload"])
+                    elif j["kind"] == "border":
+                        Generator(ChannelQueue(self.ui_queue,
+                                               "border_progress")
+                                  ).run(j["payload"])
+                    elif j["kind"] == "anim":
+                        self._run_animation(j["payload"])
+                except Exception as e:
+                    self.ui_queue.put(("status",
+                                       f"Batch job {i} failed: {e}"))
+            self.ui_queue.put(("batch_done", total))
+        finally:
+            self._batch_active = False
+
     def _busy_guard(self):
         """True = abort the new request. Offers to cancel the running job
         so a stuck/slow generation can't lock the app."""
+        if getattr(self, "_batch_active", False):
+            messagebox.showinfo("Batch running",
+                                "A batch queue is running. Wait for it to "
+                                "finish, or clear the queue first.")
+            return True
         if not self.busy:
             return False
         if messagebox.askyesno(
@@ -2772,8 +3176,8 @@ class App:
             self.random_seed_var.set(False)
 
     # -------------------------------------------------- generation
-    def _generate(self):
-        if self._busy_guard():
+    def _generate(self, queue=False):
+        if not queue and self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -2844,6 +3248,7 @@ class App:
                       steps=steps, cfg=None, batch=self.batch_var.get(),
                       random_seed=self.random_seed_var.get(),
                       transparent=self.transparent_var.get(),
+                      upscale=self.upscale_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
                       editor=editor,
@@ -2858,6 +3263,9 @@ class App:
         else:
             self.settings["last_model"] = model
         self._persist()
+        if queue:
+            self._enqueue("gen", (prompt or "art")[:38], params)
+            return
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
@@ -2940,6 +3348,17 @@ class App:
                         f"GPU {used:,} / {total:,} MB")
                 elif kind == "models_changed":
                     self._refresh_models()
+                elif kind == "app_update":
+                    info = msg[1]
+                    if messagebox.askyesno(
+                            "App update available",
+                            f"A newer version of Comic Book Art Creator "
+                            f"({info['tag']}) is available "
+                            f"(you have v{APP_VERSION}).\n\n"
+                            "Download and install it now? The app will "
+                            "restart when done."):
+                        threading.Thread(target=self._do_app_update,
+                                         args=(info,), daemon=True).start()
                 elif kind == "updates":
                     ups = msg[1]
                     eng = msg[2] if len(msg) > 2 else None
@@ -2963,6 +3382,13 @@ class App:
                         threading.Thread(target=self._download_updates,
                                          args=(ups, eng),
                                          daemon=True).start()
+                elif kind == "batch_done":
+                    self.busy = False
+                    self.go_btn.state(["!disabled"])
+                    self.job_queue = []
+                    self._refresh_queue()
+                    self.status_var.set(f"Batch complete — {msg[1]} job(s) "
+                                        "finished.")
                 elif kind == "error":
                     self.busy = False
                     self.go_btn.state(["!disabled"])
@@ -3192,7 +3618,7 @@ class App:
             self.status_var.set(f"Saved to {path}")
 
     # -------------------------------------------------- border maker
-    def _generate_border(self):
+    def _generate_border(self, queue=False):
         """Generate a themed 4:3 / 16:9 border frame with a transparent
         center — for overlays, bezels and framing. No text allowed."""
         theme = self._get(self.border_prompt_box)
@@ -3201,7 +3627,7 @@ class App:
                                 "— a short theme ('haunted forest, gnarled "
                                 "branches') or a full precise prompt.")
             return
-        if self._busy_guard():
+        if not queue and self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -3269,11 +3695,15 @@ class App:
             batch=max(1, min(10, self.batch_var.get())),
             random_seed=self.random_seed_var.get(),
             transparent=False, preset="border maker",
+            upscale=self.upscale_var.get(),
             border_cut=int(self.border_thick_var.get()),
             border_clean=clean,
             ref_images=refs, editor=editor,
             ref_collage_size=(w, h) if refs else None,
             out_size=(w, h) if refs else None)
+        if queue:
+            self._enqueue("border", "border: " + theme[:30], params)
+            return
         self.busy = True
         self.go_btn.state(["disabled"])
         self.border_progress["value"] = 0
@@ -3471,8 +3901,8 @@ class App:
             self._set(self.anim_prompt_box, txt)
             self._schedule_persist()
 
-    def _generate_animation(self):
-        if self._busy_guard():
+    def _generate_animation(self, queue=False):
+        if not queue and self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
@@ -3504,7 +3934,12 @@ class App:
                  transparent=self.anim_transparent_var.get(),
                  gif=self.anim_gif_var.get(),
                  motion=self.anim_motion_var.get(),
-                 zip=self.anim_zip_var.get(), seed=seed)
+                 zip=self.anim_zip_var.get(),
+                 sheet=self.anim_sheet_var.get(),
+                 video=self.anim_video_var.get(), seed=seed)
+        if queue:
+            self._enqueue("anim", "anim: " + action[:30], p)
+            return
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
@@ -3600,19 +4035,38 @@ class App:
                     f.save(frames_dir / f"frame_{i:03d}.png")
 
             result_path = frames_dir / "frame_000.png"
+            looped = kept if p["loop"].startswith("Seamless") \
+                else apply_loop(kept, p["loop"])
+            fps_out = p.get("base_fps", 24) / p["keep_every"]
+            extras = []
             if p.get("gif", True):
-                looped = kept if p["loop"].startswith("Seamless") \
-                    else apply_loop(kept, p["loop"])
-                fps_out = p.get("base_fps", 24) / p["keep_every"]
                 result_path = out_dir / "animation.gif"
                 save_gif(looped, result_path, fps_out, p["transparent"])
+                extras.append("GIF")
+            if p.get("sheet"):
+                try:
+                    status("Packing sprite sheet…")
+                    save_sprite_sheet(kept, out_dir / "spritesheet.png",
+                                      out_dir / "spritesheet.json", fps_out)
+                    extras.append("sprite sheet")
+                except Exception as e:
+                    status(f"Sprite sheet skipped ({e}).")
+            vid = (p.get("video") or "none").lower()
+            if vid in ("mp4", "webm"):
+                try:
+                    status(f"Encoding {vid.upper()} video…")
+                    vpath = out_dir / f"animation.{vid}"
+                    save_video(looped, vpath, fps_out, webm=(vid == "webm"))
+                    extras.append(vid.upper())
+                except Exception as e:
+                    status(f"{vid.upper()} export skipped ({e}).")
             if p["zip"]:
                 shutil.make_archive(str(out_dir), "zip", out_dir)
             self.ui_queue.put(("finished_image", kept[0].copy(),
                               dict(model="animator", seed=p["seed"]),
                               result_path))
             status(f"Animation done: {len(kept)} frames"
-                   + (" + GIF" if p.get("gif", True) else "")
+                   + ("".join(f" + {e}" for e in extras))
                    + f" in {out_dir.name}"
                    + (" (+zip)" if p["zip"] else "")
                    + ". Select it in the gallery to watch it play.")
@@ -3641,6 +4095,163 @@ class App:
         self.status_var.set(
             f"Added to training set ({len(list(ds.glob('*.png')))} images) "
             "— captions are editable .txt files; see TRAINING.md.")
+
+    # -------------------------------------------------- lora training
+    def _train_lora_dialog(self):
+        dlg = Toplevel(self.root)
+        dlg.title("Train a LoRA from your training set")
+        dlg.configure(bg=BG)
+        dlg.geometry("600x360")
+        frm = ttk.Frame(dlg, padding=14); frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        ds = TRAIN_DIR / "dataset"
+        n_imgs = len(list(ds.glob("*.png"))) if ds.exists() else 0
+        ttk.Label(frm, text=f"Training set: {n_imgs} image(s) in "
+                            "training\\dataset. 15-30+ with captions is "
+                            "ideal (use ⭐ Add to training set).",
+                  style="Dim.TLabel", wraplength=560,
+                  justify="left").grid(row=0, column=0, columnspan=2,
+                                       sticky=W, pady=(0, 8))
+        ttk.Label(frm, text="LoRA name (SDXL_ prefix added):").grid(
+            row=1, column=0, sticky=W)
+        name_var = StringVar(value="MyStyle")
+        ttk.Entry(frm, textvariable=name_var).grid(row=1, column=1,
+                                                   sticky=NSEW, padx=6, pady=3)
+        ttk.Label(frm, text="Trigger word:").grid(row=2, column=0, sticky=W)
+        trig_var = StringVar(value="mystyle")
+        ttk.Entry(frm, textvariable=trig_var).grid(row=2, column=1,
+                                                   sticky=NSEW, padx=6, pady=3)
+        ttk.Label(frm, text="Base model:").grid(row=3, column=0, sticky=W)
+        base_var = StringVar()
+        sdxl = [c for c in list_checkpoints()
+                if model_family(c) not in ("flux", "schnell")]
+        base_var.set(next((c for c in sdxl if "juggernaut" in c.lower()),
+                          sdxl[0] if sdxl else ""))
+        ttk.Combobox(frm, textvariable=base_var, state="readonly",
+                     exportselection=False, values=sdxl).grid(
+            row=3, column=1, sticky=NSEW, padx=6, pady=3)
+        ttk.Label(frm, text="Steps:").grid(row=4, column=0, sticky=W)
+        steps_var = IntVar(value=2000)
+        ttk.Spinbox(frm, from_=500, to=6000, increment=100,
+                    textvariable=steps_var, exportselection=False,
+                    width=8).grid(row=4, column=1, sticky=W, padx=6, pady=3)
+        ready = training_toolkit_ready()
+        stat = StringVar(value="Toolkit ready — training runs on your GPU."
+                         if ready else "One-time toolkit setup needed "
+                         "(git + Python 3.10-3.12 + ~5 GB download).")
+        ttk.Label(frm, textvariable=stat, style="Dim.TLabel",
+                  wraplength=560, justify="left").grid(
+            row=6, column=0, columnspan=2, sticky=W, pady=8)
+        btns = ttk.Frame(frm); btns.grid(row=5, column=1, sticky=E, pady=4)
+
+        def start():
+            if not base_var.get():
+                stat.set("No SDXL base model installed to train on.")
+                return
+            if n_imgs < 5:
+                stat.set("Add at least 5 captioned images first.")
+                return
+            cfg = dict(name=name_var.get().strip() or "MyStyle",
+                       trigger=trig_var.get().strip(),
+                       base=base_var.get(), steps=int(steps_var.get()))
+            dlg.destroy()
+            threading.Thread(target=self._run_lora_training, args=(cfg,),
+                             daemon=True).start()
+
+        ttk.Button(btns, text="Start training", command=start).pack(
+            side="left")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=6)
+
+    def _run_lora_training(self, cfg):
+        st = lambda s: self.ui_queue.put(("status", s))
+        try:
+            if getattr(self, "_batch_active", False) or self.busy:
+                st("Wait for the current job to finish before training.")
+                return
+            if not training_toolkit_ready():
+                st("Setting up the training toolkit (one time)…")
+                install_training_toolkit(st)
+            # build a kohya data dir: <repeats>_<trigger>/ with images+txt
+            src = TRAIN_DIR / "dataset"
+            run_root = TRAIN_DIR / "_run"
+            shutil.rmtree(run_root, ignore_errors=True)
+            concept = run_root / f"10_{cfg['trigger'] or 'style'}"
+            concept.mkdir(parents=True, exist_ok=True)
+            for f in src.glob("*.png"):
+                shutil.copy2(f, concept / f.name)
+                txt = f.with_suffix(".txt")
+                cap = txt.read_text(encoding="utf-8") if txt.exists() else ""
+                if cfg["trigger"] and cfg["trigger"] not in cap:
+                    cap = f"{cfg['trigger']}, {cap}".strip(", ")
+                (concept / f.with_suffix(".txt").name).write_text(
+                    cap, encoding="utf-8")
+            out_name = cfg["name"]
+            if not out_name.lower().startswith("sdxl_"):
+                out_name = "SDXL_" + out_name
+            # free the engine's VRAM so training has the whole card
+            try:
+                requests.post(f"{ENGINE_URL}/free",
+                              json={"unload_models": True,
+                                    "free_memory": True}, timeout=10)
+            except requests.RequestException:
+                pass
+            st(f"Training {out_name} — this runs on your GPU and can take "
+               "30-60 min. Watch here for progress.")
+            cmd = [str(TRAINVENV_PY.parent / "accelerate.exe"), "launch",
+                   "--num_processes", "1", "--mixed_precision", "bf16",
+                   "--num_cpu_threads_per_process", "4",
+                   str(SDSCRIPTS_DIR / "sdxl_train_network.py"),
+                   "--pretrained_model_name_or_path",
+                   str(MODELS / "checkpoints" / cfg["base"]),
+                   "--train_data_dir", str(run_root),
+                   "--output_dir", str(TRAIN_DIR / "output"),
+                   "--output_name", out_name,
+                   "--resolution", "1024,1024", "--enable_bucket",
+                   "--min_bucket_reso", "512", "--max_bucket_reso", "1536",
+                   "--caption_extension", ".txt",
+                   "--network_module", "networks.lora",
+                   "--network_dim", "32", "--network_alpha", "16",
+                   "--optimizer_type", "AdamW8bit", "--learning_rate", "1e-4",
+                   "--lr_scheduler", "cosine", "--lr_warmup_steps", "100",
+                   "--max_train_steps", str(cfg["steps"]),
+                   "--train_batch_size", "2", "--gradient_checkpointing",
+                   "--save_precision", "bf16", "--sdpa", "--cache_latents",
+                   "--save_model_as", "safetensors", "--seed", "42",
+                   "--no_half_vae"]
+            logf = TRAIN_DIR / "inapp_train.log"
+            with open(logf, "w", encoding="utf-8", errors="replace") as lf:
+                proc = subprocess.Popen(cmd, cwd=str(SDSCRIPTS_DIR),
+                                        stdout=lf, stderr=subprocess.STDOUT,
+                                        creationflags=NO_WINDOW,
+                                        env=_contained_env())
+                last = 0
+                while proc.poll() is None:
+                    time.sleep(8)
+                    try:
+                        txt = logf.read_text(encoding="utf-8",
+                                             errors="replace")
+                        mobj = re.findall(r"(\d+)/(\d+)", txt)
+                        if mobj:
+                            cur, tot = mobj[-1]
+                            if int(cur) != last:
+                                last = int(cur)
+                                st(f"Training {out_name}: step {cur}/{tot}")
+                    except OSError:
+                        pass
+            if proc.returncode != 0:
+                raise RuntimeError("training failed — see "
+                                   "training\\inapp_train.log")
+            result = TRAIN_DIR / "output" / f"{out_name}.safetensors"
+            if not result.exists():
+                raise RuntimeError("training finished but no model file "
+                                   "was produced")
+            shutil.copy2(result, MODELS / "loras" / result.name)
+            self.ui_queue.put(("models_changed", None))
+            st(f"Done! {result.name} is installed — tick it in the LoRA "
+               f"list and use the trigger word '{cfg['trigger']}'.")
+        except Exception as e:
+            self.ui_queue.put(("error", f"LoRA training: {e}"))
 
     # -------------------------------------------------- civitai loras
     def _civitai_dialog(self):
@@ -3735,6 +4346,17 @@ class App:
 
 def main():
     root = Tk()
+    _mutex_handle, already = single_instance_handle()
+    if already:
+        from tkinter import messagebox as _mb
+        if not _mb.askyesno(
+                "Already running",
+                "Comic Book Art Creator appears to be already running.\n\n"
+                "Running a second copy can make generations and progress go "
+                "to the wrong window, and both share one engine.\n\n"
+                "Open another window anyway?"):
+            root.destroy()
+            return
     App(root)
     root.mainloop()
 

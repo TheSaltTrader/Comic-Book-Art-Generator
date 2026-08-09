@@ -147,5 +147,10 @@
     "url": "https://github.com/TheSaltTrader/Comic-Book-Art-Generator/releases/download/v1.10.1/SDXL_BorderFrames_v1.safetensors",
     "local": "SDXL_BorderFrames_v1.safetensors",
     "dir": "loras"
+  },
+  {
+    "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+    "local": "RealESRGAN_x4plus.pth",
+    "dir": "upscale_models"
   }
 ]
