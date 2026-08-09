@@ -1,5 +1,11 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.5 — 2026-08-09
+- The LoRA list now shows only the **current** border-frame LoRA;
+  superseded versions (e.g. an older SDXL_BorderFrames_v#) are hidden so
+  old attempts that didn't work don't clutter the list. Other LoRAs are
+  unaffected.
+
 ## v1.10.4 — 2026-08-09
 - **Auto-clean center (2nd pass).** When a theme puts a character or
   scene in the middle of a border, the app now automatically runs the

@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.4"
+APP_VERSION = "1.10.5"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -249,6 +249,35 @@ def list_checkpoints():
 def list_loras():
     return list(dict.fromkeys(
         _api_choices("LoraLoader", "lora_name") + scan_models("loras")))
+
+
+# the app's own versioned LoRAs (e.g. SDXL_BorderFrames_v3): only the
+# current shipped version should be offered — hide superseded ones so
+# old attempts that didn't work don't clutter the list. The canonical
+# names are the module constants (e.g. BORDER_LORA_FILE), read at call
+# time so there's a single source of truth.
+def _canonical_family(fname):
+    """('sdxl_borderframes', 3) for 'SDXL_BorderFrames_v3.safetensors',
+    else None — the family key and version of a versioned LoRA name."""
+    mobj = re.match(r"^(.*?)_v(\d+)\.safetensors$", fname, re.IGNORECASE)
+    if not mobj:
+        return None
+    return mobj.group(1).lower(), int(mobj.group(2))
+
+
+def _visible_loras(loras):
+    canonical = {}   # family -> the one shipped filename to keep
+    for fname in (BORDER_LORA_FILE,):
+        fam = _canonical_family(fname)
+        if fam:
+            canonical[fam[0]] = fname
+    out = []
+    for name in loras:
+        fam = _canonical_family(name)
+        if fam and fam[0] in canonical and name != canonical[fam[0]]:
+            continue   # a superseded version of one of our shipped LoRAs
+        out.append(name)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -2632,7 +2661,7 @@ class App:
             list(self._model_display)
         self._refresh_border_styles()
 
-        loras = list_loras()
+        loras = _visible_loras(list_loras())
         keep = set(self._selected_loras()) | getattr(self, "_pending_loras",
                                                      set())
         self._pending_loras = set()
