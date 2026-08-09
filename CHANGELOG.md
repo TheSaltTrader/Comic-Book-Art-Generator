@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.11.2 — 2026-08-09
+- Removed the in-app LoRA training feature to keep the app simple and
+  fully self-contained (it was the only feature that needed extra tools
+  installed). "⭐ Add to training set" stays — it still builds a
+  captioned dataset you can train with an external tool (see
+  TRAINING.md).
+
 ## v1.11.1 — 2026-08-09
 - Dropdowns now show their saved selection in readable text at all times.
   Previously most readonly dropdowns (aspect, size, keep, loop, motion,

@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.11.2"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -65,9 +65,6 @@ def engine_python():
 MODELS = PROJECT / "models"
 OUTPUT = PROJECT / "output"
 RAW_OUT = OUTPUT / "_raw"
-TRAIN_DIR = PROJECT / "training"
-TRAINVENV_PY = TRAIN_DIR / "trainvenv" / "Scripts" / "python.exe"
-SDSCRIPTS_DIR = TRAIN_DIR / "sd-scripts"
 SETTINGS_FILE = APP_DIR / "settings.json"
 PRESETS_FILE = APP_DIR / "presets.json"
 MANIFEST_FILE = APP_DIR / "models_manifest.json"
@@ -247,59 +244,6 @@ def engine_is_ours():
         return str(pid) in out
     except Exception:
         return False
-
-
-def training_toolkit_ready():
-    """True when the kohya training toolkit (venv + sd-scripts) is set up
-    in the project's training folder."""
-    return TRAINVENV_PY.exists() and \
-        (SDSCRIPTS_DIR / "sdxl_train_network.py").exists()
-
-
-def _find_system_python():
-    """A real Python 3.10-3.12 to build the training venv (the app's
-    embedded runtime can't create venvs). Returns a command list or None."""
-    for cand in (["py", "-3.12"], ["py", "-3.11"], ["py", "-3.10"],
-                 ["python"]):
-        try:
-            r = subprocess.run(cand + ["--version"], capture_output=True,
-                               text=True, creationflags=NO_WINDOW, timeout=10)
-            if r.returncode == 0 and "3.1" in (r.stdout + r.stderr):
-                return cand
-        except Exception:
-            continue
-    return None
-
-
-def install_training_toolkit(status_cb):
-    """One-time setup: clone kohya sd-scripts and build a training venv
-    with CUDA torch. Needs git + a system Python 3.10-3.12 + internet."""
-    py = _find_system_python()
-    if not py:
-        raise RuntimeError("Python 3.10-3.12 is required to set up training "
-                           "(install it from python.org, then retry).")
-    TRAIN_DIR.mkdir(parents=True, exist_ok=True)
-    if not (SDSCRIPTS_DIR / "sdxl_train_network.py").exists():
-        status_cb("Cloning the training scripts…")
-        subprocess.run(["git", "clone", "--depth", "1",
-                        "https://github.com/kohya-ss/sd-scripts.git",
-                        str(SDSCRIPTS_DIR)], check=True,
-                       creationflags=NO_WINDOW, timeout=600)
-    if not TRAINVENV_PY.exists():
-        status_cb("Creating the training environment…")
-        subprocess.run(py + ["-m", "venv", str(TRAIN_DIR / "trainvenv")],
-                       check=True, creationflags=NO_WINDOW, timeout=300)
-    status_cb("Installing PyTorch (CUDA) — several GB, one time…")
-    subprocess.run([str(TRAINVENV_PY), "-m", "pip", "install", "--quiet",
-                    "torch", "torchvision", "--index-url",
-                    "https://download.pytorch.org/whl/cu128"], check=True,
-                   creationflags=NO_WINDOW, timeout=3600)
-    status_cb("Installing training requirements…")
-    subprocess.run([str(TRAINVENV_PY), "-m", "pip", "install", "--quiet",
-                    "-r", str(SDSCRIPTS_DIR / "requirements.txt")],
-                   cwd=str(SDSCRIPTS_DIR), check=True,
-                   creationflags=NO_WINDOW, timeout=1800)
-    status_cb("Training toolkit ready.")
 
 
 def single_instance_handle():
@@ -2335,8 +2279,6 @@ class App:
                    command=self._civitai_dialog).pack(side="left", padx=6)
         ttk.Button(brow, text="⭐ Add to training set",
                    command=self._add_to_training).pack(side="left", padx=6)
-        ttk.Button(brow, text="🎓 Train LoRA…",
-                   command=self._train_lora_dialog).pack(side="left", padx=6)
         self.info_var = StringVar(value="")
         ttk.Label(brow, textvariable=self.info_var,
                   style="Dim.TLabel").pack(side="right")
@@ -4109,163 +4051,6 @@ class App:
         self.status_var.set(
             f"Added to training set ({len(list(ds.glob('*.png')))} images) "
             "— captions are editable .txt files; see TRAINING.md.")
-
-    # -------------------------------------------------- lora training
-    def _train_lora_dialog(self):
-        dlg = Toplevel(self.root)
-        dlg.title("Train a LoRA from your training set")
-        dlg.configure(bg=BG)
-        dlg.geometry("600x360")
-        frm = ttk.Frame(dlg, padding=14); frm.pack(fill="both", expand=True)
-        frm.columnconfigure(1, weight=1)
-        ds = TRAIN_DIR / "dataset"
-        n_imgs = len(list(ds.glob("*.png"))) if ds.exists() else 0
-        ttk.Label(frm, text=f"Training set: {n_imgs} image(s) in "
-                            "training\\dataset. 15-30+ with captions is "
-                            "ideal (use ⭐ Add to training set).",
-                  style="Dim.TLabel", wraplength=560,
-                  justify="left").grid(row=0, column=0, columnspan=2,
-                                       sticky=W, pady=(0, 8))
-        ttk.Label(frm, text="LoRA name (SDXL_ prefix added):").grid(
-            row=1, column=0, sticky=W)
-        name_var = StringVar(value="MyStyle")
-        ttk.Entry(frm, textvariable=name_var).grid(row=1, column=1,
-                                                   sticky=NSEW, padx=6, pady=3)
-        ttk.Label(frm, text="Trigger word:").grid(row=2, column=0, sticky=W)
-        trig_var = StringVar(value="mystyle")
-        ttk.Entry(frm, textvariable=trig_var).grid(row=2, column=1,
-                                                   sticky=NSEW, padx=6, pady=3)
-        ttk.Label(frm, text="Base model:").grid(row=3, column=0, sticky=W)
-        base_var = StringVar()
-        sdxl = [c for c in list_checkpoints()
-                if model_family(c) not in ("flux", "schnell")]
-        base_var.set(next((c for c in sdxl if "juggernaut" in c.lower()),
-                          sdxl[0] if sdxl else ""))
-        ttk.Combobox(frm, textvariable=base_var, state="readonly",
-                     exportselection=False, values=sdxl).grid(
-            row=3, column=1, sticky=NSEW, padx=6, pady=3)
-        ttk.Label(frm, text="Steps:").grid(row=4, column=0, sticky=W)
-        steps_var = IntVar(value=2000)
-        ttk.Spinbox(frm, from_=500, to=6000, increment=100,
-                    textvariable=steps_var, exportselection=False,
-                    width=8).grid(row=4, column=1, sticky=W, padx=6, pady=3)
-        ready = training_toolkit_ready()
-        stat = StringVar(value="Toolkit ready — training runs on your GPU."
-                         if ready else "One-time toolkit setup needed "
-                         "(git + Python 3.10-3.12 + ~5 GB download).")
-        ttk.Label(frm, textvariable=stat, style="Dim.TLabel",
-                  wraplength=560, justify="left").grid(
-            row=6, column=0, columnspan=2, sticky=W, pady=8)
-        btns = ttk.Frame(frm); btns.grid(row=5, column=1, sticky=E, pady=4)
-
-        def start():
-            if not base_var.get():
-                stat.set("No SDXL base model installed to train on.")
-                return
-            if n_imgs < 5:
-                stat.set("Add at least 5 captioned images first.")
-                return
-            cfg = dict(name=name_var.get().strip() or "MyStyle",
-                       trigger=trig_var.get().strip(),
-                       base=base_var.get(), steps=int(steps_var.get()))
-            dlg.destroy()
-            threading.Thread(target=self._run_lora_training, args=(cfg,),
-                             daemon=True).start()
-
-        ttk.Button(btns, text="Start training", command=start).pack(
-            side="left")
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
-            side="left", padx=6)
-
-    def _run_lora_training(self, cfg):
-        st = lambda s: self.ui_queue.put(("status", s))
-        try:
-            if getattr(self, "_batch_active", False) or self.busy:
-                st("Wait for the current job to finish before training.")
-                return
-            if not training_toolkit_ready():
-                st("Setting up the training toolkit (one time)…")
-                install_training_toolkit(st)
-            # build a kohya data dir: <repeats>_<trigger>/ with images+txt
-            src = TRAIN_DIR / "dataset"
-            run_root = TRAIN_DIR / "_run"
-            shutil.rmtree(run_root, ignore_errors=True)
-            concept = run_root / f"10_{cfg['trigger'] or 'style'}"
-            concept.mkdir(parents=True, exist_ok=True)
-            for f in src.glob("*.png"):
-                shutil.copy2(f, concept / f.name)
-                txt = f.with_suffix(".txt")
-                cap = txt.read_text(encoding="utf-8") if txt.exists() else ""
-                if cfg["trigger"] and cfg["trigger"] not in cap:
-                    cap = f"{cfg['trigger']}, {cap}".strip(", ")
-                (concept / f.with_suffix(".txt").name).write_text(
-                    cap, encoding="utf-8")
-            out_name = cfg["name"]
-            if not out_name.lower().startswith("sdxl_"):
-                out_name = "SDXL_" + out_name
-            # free the engine's VRAM so training has the whole card
-            try:
-                requests.post(f"{ENGINE_URL}/free",
-                              json={"unload_models": True,
-                                    "free_memory": True}, timeout=10)
-            except requests.RequestException:
-                pass
-            st(f"Training {out_name} — this runs on your GPU and can take "
-               "30-60 min. Watch here for progress.")
-            cmd = [str(TRAINVENV_PY.parent / "accelerate.exe"), "launch",
-                   "--num_processes", "1", "--mixed_precision", "bf16",
-                   "--num_cpu_threads_per_process", "4",
-                   str(SDSCRIPTS_DIR / "sdxl_train_network.py"),
-                   "--pretrained_model_name_or_path",
-                   str(MODELS / "checkpoints" / cfg["base"]),
-                   "--train_data_dir", str(run_root),
-                   "--output_dir", str(TRAIN_DIR / "output"),
-                   "--output_name", out_name,
-                   "--resolution", "1024,1024", "--enable_bucket",
-                   "--min_bucket_reso", "512", "--max_bucket_reso", "1536",
-                   "--caption_extension", ".txt",
-                   "--network_module", "networks.lora",
-                   "--network_dim", "32", "--network_alpha", "16",
-                   "--optimizer_type", "AdamW8bit", "--learning_rate", "1e-4",
-                   "--lr_scheduler", "cosine", "--lr_warmup_steps", "100",
-                   "--max_train_steps", str(cfg["steps"]),
-                   "--train_batch_size", "2", "--gradient_checkpointing",
-                   "--save_precision", "bf16", "--sdpa", "--cache_latents",
-                   "--save_model_as", "safetensors", "--seed", "42",
-                   "--no_half_vae"]
-            logf = TRAIN_DIR / "inapp_train.log"
-            with open(logf, "w", encoding="utf-8", errors="replace") as lf:
-                proc = subprocess.Popen(cmd, cwd=str(SDSCRIPTS_DIR),
-                                        stdout=lf, stderr=subprocess.STDOUT,
-                                        creationflags=NO_WINDOW,
-                                        env=_contained_env())
-                last = 0
-                while proc.poll() is None:
-                    time.sleep(8)
-                    try:
-                        txt = logf.read_text(encoding="utf-8",
-                                             errors="replace")
-                        mobj = re.findall(r"(\d+)/(\d+)", txt)
-                        if mobj:
-                            cur, tot = mobj[-1]
-                            if int(cur) != last:
-                                last = int(cur)
-                                st(f"Training {out_name}: step {cur}/{tot}")
-                    except OSError:
-                        pass
-            if proc.returncode != 0:
-                raise RuntimeError("training failed — see "
-                                   "training\\inapp_train.log")
-            result = TRAIN_DIR / "output" / f"{out_name}.safetensors"
-            if not result.exists():
-                raise RuntimeError("training finished but no model file "
-                                   "was produced")
-            shutil.copy2(result, MODELS / "loras" / result.name)
-            self.ui_queue.put(("models_changed", None))
-            st(f"Done! {result.name} is installed — tick it in the LoRA "
-               f"list and use the trigger word '{cfg['trigger']}'.")
-        except Exception as e:
-            self.ui_queue.put(("error", f"LoRA training: {e}"))
 
     # -------------------------------------------------- civitai loras
     def _civitai_dialog(self):
