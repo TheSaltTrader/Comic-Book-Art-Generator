@@ -1,5 +1,17 @@
 # Changelog — Comic Book Art Creator
 
+## v1.10.3 — 2026-08-08
+- **Borders now float with a transparent margin** instead of running snug
+  to the screen edge, matching the reference bezels.
+- **Transparent center follows the frame's real inner silhouette**
+  (octagon, arch, scalloped) — it keys the plain center by its own color
+  instead of cutting a straight rectangle (falls back to a soft rectangle
+  only when the center isn't cleanly empty).
+- Lower border-LoRA strength and a stronger negative prompt reduce
+  stray centered figures and gibberish text in the frame.
+- Tip: use Variations 3–5 for borders and keep the best — some themes
+  put content in the center or under-draw on a given seed.
+
 ## v1.10.2 — 2026-08-08
 - **Much better borders.** The Border maker no longer forces generation
   into a flat rectangular edge band (which produced "a strip at the edge

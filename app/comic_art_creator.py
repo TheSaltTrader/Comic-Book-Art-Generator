@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.10.2"
+APP_VERSION = "1.10.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1082,39 +1082,70 @@ BORDER_SIZES = {
 }
 BORDER_NEGATIVE = ("text, letters, words, numbers, writing, typography, "
                    "logo, watermark, signature, caption, label, subtitles, "
-                   "full scene, landscape, scenery in the center, filled "
-                   "center, busy center, background illustration in the "
-                   "middle, picture in the middle, framed painting, "
-                   "content in the center")
+                   "title banner, gibberish text, full scene, landscape, "
+                   "scenery in the center, filled center, busy center, "
+                   "background illustration in the middle, picture in the "
+                   "middle, framed painting, content in the center, "
+                   "full body character standing in the center, person in "
+                   "the middle, large figure in the center, mascot in the "
+                   "center, character blocking the center")
 
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
 BORDER_TEMPLATE = (
-    "an extremely ornate and intricate decorative border frame themed "
-    "after {theme}, elaborate layered ornamentation built from the "
-    "iconic props, character silhouettes, colors and symbols of {theme}, "
-    "richly detailed sculpted frame wrapping all four edges with large "
-    "elaborate corner pieces and themed cartouches, decorative elements "
-    "of varying depth reaching inward from the edges, asymmetric organic "
-    "silhouette, ornate game UI bezel, concept art quality, intricate "
-    "detail, completely textless with no lettering or logos, the middle "
-    "is a plain empty flat solid white panel with absolutely nothing in "
-    "it, empty white center")
+    "a highly detailed ornate decorative {theme} frame, presented as a "
+    "single frame-shaped object floating at the center of a plain solid "
+    "pure white background, a wide even margin of empty white space "
+    "separates the ornate frame from all four edges so the frame does "
+    "NOT touch the edges of the image, the entire middle is plain empty "
+    "pure white with absolutely nothing in it, the frame has an "
+    "irregular decorative outer silhouette with protruding ornaments and "
+    "an intricate organic inner edge, elaborate corner pieces and themed "
+    "cartouches built from the props, symbols and colors of {theme}, "
+    "ornaments of varying depth, ornate game UI bezel, concept art "
+    "quality, intricate detail, completely textless with no lettering, "
+    "only the frame itself is colored and detailed, everything around it "
+    "and in the center is pure flat white")
 
 
 
-def cut_center(img, thickness_pct):
-    """Make the enclosed center of a frame transparent following the
-    frame's REAL inner silhouette — flood-fill the plain middle outward
-    until it meets the frame art, so ornaments that reach inward are
-    kept. Falls back to a soft rectangle when the frame doesn't cleanly
-    enclose a center (so a bad generation never yields worse than before).
-    """
+def _add_margin(img, margin_pct):
+    """Shrink the (already alpha-cut) frame and center it on a fully
+    transparent canvas, so the frame floats free of the image edges like
+    the reference bezels instead of bleeding to the border."""
+    if margin_pct <= 0:
+        return img
+    w, h = img.size
+    scale = 1.0 - 2 * margin_pct / 100.0
+    sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
+    small = img.resize((sw, sh), Image.LANCZOS)
+    canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    canvas.paste(small, ((w - sw) // 2, (h - sh) // 2), small)
+    return canvas
+
+
+def cut_center(img, thickness_pct, margin_pct=6):
+    """Turn a frame render into a floating transparent-background bezel.
+
+    The border LoRA draws the frame in color with a plain (white/grey)
+    empty center. We flood that center region by its OWN color so the
+    transparency follows the frame's REAL organic inner edge (octagon,
+    arch, scalloped, …) instead of a rectangular cut. Then we add a
+    transparent outer margin so the frame doesn't touch the screen edge.
+
+    Falls back to a soft rectangle only when no clean center is found
+    (e.g. the theme filled the middle), so a border is never worse than
+    before."""
     import numpy as np
     img = img.convert("RGBA")
     w, h = img.size
     rect_t = max(8, int(min(w, h) * thickness_pct / 100))
+    cx, cy = w // 2, h // 2
+    center_seeds = [(cx, cy), (cx, int(h * 0.35)), (cx, int(h * 0.65)),
+                    (int(w * 0.3), cy), (int(w * 0.7), cy),
+                    (int(w * 0.4), int(h * 0.4)),
+                    (int(w * 0.6), int(h * 0.6))]
 
     def rect_alpha():
         m = Image.new("L", (w, h), 255)
@@ -1122,39 +1153,38 @@ def cut_center(img, thickness_pct):
             (rect_t, rect_t, w - rect_t, h - rect_t), fill=0)
         return m.filter(ImageFilter.GaussianBlur(2))
 
-    try:
+    def flood(thresh):
         fill = img.convert("RGB")
-        sent = (255, 0, 255)   # sentinel color for the flooded region
-        cx, cy = w // 2, h // 2
-        seeds = [(cx, cy), (cx, int(h * 0.4)), (cx, int(h * 0.6)),
-                 (int(w * 0.4), cy), (int(w * 0.6), cy)]
-        for s in seeds:
-            ImageDraw.floodfill(fill, s, sent, thresh=42)
-        arr = np.asarray(fill)
-        hole = ((arr[..., 0] == 255) & (arr[..., 1] == 0)
-                & (arr[..., 2] == 255))
+        sent = (255, 0, 255)
+        for s in center_seeds:
+            try:
+                ImageDraw.floodfill(fill, s, sent, thresh=thresh)
+            except Exception:
+                pass
+        a = np.asarray(fill)
+        return ((a[..., 0] == 255) & (a[..., 1] == 0) & (a[..., 2] == 255))
+
+    try:
+        # generous threshold keys the plain center whatever its shade,
+        # following its organic outline; must be a real central void
+        hole = flood(70)
         frac = float(hole.mean())
         edge_touch = bool(hole[0].any() or hole[-1].any()
                           or hole[:, 0].any() or hole[:, -1].any())
-        # a real framed center is a big, single, clean empty region. If the
-        # flood found only small/fragmented patches (theme bled into the
-        # middle) fall back to a clean rectangle rather than leave junk.
-        if frac < 0.35 or frac > 0.9 or edge_touch:
-            img.putalpha(rect_alpha())
-            return img
-        alpha = np.where(hole, 0, 255).astype(np.uint8)
-        # guarantee an opaque outer margin so the frame is never eaten
-        m = max(4, rect_t // 2)
-        alpha[:m, :] = 255
-        alpha[-m:, :] = 255
-        alpha[:, :m] = 255
-        alpha[:, -m:] = 255
-        am = Image.fromarray(alpha, "L").filter(ImageFilter.GaussianBlur(2))
-        img.putalpha(am)
-        return img
+        if 0.18 < frac < 0.9 and not edge_touch:
+            alpha = np.where(hole, 0, 255).astype(np.uint8)
+            # never eat the outermost frame pixels
+            m = max(3, rect_t // 3)
+            alpha[:m, :] = 255; alpha[-m:, :] = 255
+            alpha[:, :m] = 255; alpha[:, -m:] = 255
+            am = Image.fromarray(alpha, "L").filter(
+                ImageFilter.GaussianBlur(1.2))
+            img.putalpha(am)
+            return _add_margin(img, margin_pct)
     except Exception:
-        img.putalpha(rect_alpha())
-        return img
+        pass
+    img.putalpha(rect_alpha())
+    return _add_margin(img, margin_pct)
 
 
 # --------------------------------------------------------------------------
@@ -3129,7 +3159,7 @@ class App:
             if have_border_lora and \
                     model_family(model) not in ("flux", "schnell"):
                 if BORDER_LORA_FILE not in [n for n, _s in loras]:
-                    loras.append((BORDER_LORA_FILE, 0.9))
+                    loras.append((BORDER_LORA_FILE, 0.8))
                 prompt = f"{BORDER_TRIGGER}, " + prompt
         seed = random.randrange(2**32) if self.random_seed_var.get() \
             else int(self.seed_var.get() or 0)
