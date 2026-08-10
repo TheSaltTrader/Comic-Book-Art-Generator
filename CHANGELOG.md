@@ -1,5 +1,32 @@
 # Changelog — Comic Book Art Creator
 
+## v1.13.0 — 2026-08-10
+- **Prompt enhancer (optional, local).** A ✨ Enhance button under the
+  prompt expands a few words into a full comic-art prompt using Ollama,
+  a free local LLM runner — nothing leaves your machine. ↩ puts your own
+  wording back. Ollama is never installed or required by this app: if it
+  isn't running, the button explains what it is and everything else works
+  exactly as before. Reasoning-model padding, "Sure, here's…" lead-ins and
+  stray quoting are stripped from what comes back.
+- **Reads the maps a trainer actually writes.** The 🧭 RAG map… button now
+  takes a map file, the folder holding one, or a trainer's `index.json` —
+  and understands both the flat `.ragmap.json` and the earlier
+  `lora-retrieval-map` layout (`images_dir`, `embeddings_file`, entries
+  with no keywords, a LoRA named without its extension). See RAGMAP.md.
+- **The paired LoRA installs itself.** If the map names a LoRA you don't
+  have and the file is sitting next to the map — which is where a trainer
+  leaves it — the app offers to copy it into your LoRA folder. Matching
+  is case- and extension-tolerant, so a map made on another machine still
+  finds its LoRA here.
+- **Varied references.** When a map ships CLIP embeddings, an example
+  image that is a near-duplicate of one already retrieved is passed over
+  for the next-best different one, so a generation isn't guided by the
+  same picture four times.
+- **Nothing missing is fatal.** A map with no images now loads and
+  contributes its captions as text rather than being rejected; a map
+  whose LoRA isn't installed still guides with its images; corrupt or
+  mismatched embeddings are ignored instead of failing the load.
+
 ## v1.12.0 — 2026-08-10
 - **RAG maps.** New "🧭 RAG map…" button in the first section loads a
   `.ragmap.json` produced alongside a trained LoRA (see RAGMAP.md for the

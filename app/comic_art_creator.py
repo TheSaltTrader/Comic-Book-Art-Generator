@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1432,40 +1432,264 @@ class ChannelQueue:
             self.q.put(msg)
 
 
+RAG_DUP_SIM = 0.97      # cosine above this = the same picture twice
+_RAG_STOP = {"a", "an", "the", "of", "in", "on", "at", "with", "and", "or",
+             "to", "is", "are", "was", "this", "that", "it", "its", "for",
+             "by", "from", "as", "he", "she", "they", "his", "her", "their",
+             "there", "image", "photo", "picture", "shot"}
+
+
+def _caption_keywords(caption, limit=24):
+    """Match-worthy words from a caption. Trainer-built maps carry
+    captions/tags but no separate keyword list, so we derive one."""
+    out = []
+    for w in re.findall(r"[a-z0-9]+", (caption or "").lower()):
+        if len(w) > 2 and w not in _RAG_STOP and w not in out:
+            out.append(w)
+    return out[:limit]
+
+
+def _ragmap_file(path):
+    """Accept the map file itself or the folder holding it."""
+    p = Path(path)
+    if not p.is_dir():
+        return p
+    for pat in ("*.ragmap.json", "index.json", "*.json"):
+        hits = sorted(p.glob(pat))
+        if hits:
+            return hits[0]
+    raise FileNotFoundError(f"no .ragmap.json or index.json in {p}")
+
+
+def _read_safetensors_f32(path, key):
+    """Minimal safetensors reader — 8-byte LE header length, JSON header,
+    then raw tensor bytes. Returns an [n, dim] float32 array, or None if
+    numpy is missing or the file isn't the 2-D float matrix we expect
+    (embeddings are a bonus; the map works without them)."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    try:
+        with open(path, "rb") as f:
+            hlen = int.from_bytes(f.read(8), "little")
+            head = json.loads(f.read(hlen).decode("utf-8"))
+            info = head.get(key) or next(
+                (v for k, v in head.items() if k != "__metadata__"), None)
+            if not isinstance(info, dict) or info.get("dtype") != "F32" \
+                    or len(info.get("shape", [])) != 2:
+                return None
+            start, end = info["data_offsets"]
+            f.seek(8 + hlen + start)
+            buf = f.read(end - start)
+        rows, dim = info["shape"]
+        arr = np.frombuffer(buf, dtype="<f4")
+        if arr.size != rows * dim:
+            return None
+        arr = arr.reshape(rows, dim)
+        norm = np.linalg.norm(arr, axis=1, keepdims=True)
+        return arr / np.where(norm == 0, 1, norm)   # cosine == dot product
+    except Exception:
+        return None
+
+
 def load_ragmap(path):
-    """Load a .ragmap.json produced alongside a trained LoRA. Resolves
-    each entry's image to an absolute path (relative to the map file /
-    its image_dir). Schema — cbac-ragmap/1:
-      {"schema":"cbac-ragmap/1","name":..,"lora":<file>,"trigger":<word>,
-       "image_dir":"images","weight":0.8,"top_k":4,
-       "entries":[{"image":"0001.png","keywords":[...],"caption":"..."}]}"""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    base = Path(path).resolve().parent
-    img_dir = base / data.get("image_dir", "")
+    """Load a RAG map paired with a trained LoRA. Two layouts are read:
+
+      * this app's flat map — cbac-ragmap/1:
+        {"schema":"cbac-ragmap/1","name":..,"lora":<file>,"trigger":<word>,
+         "image_dir":"images","weight":0.8,"top_k":4,
+         "entries":[{"image":"0001.png","keywords":[...],"caption":"..."}]}
+      * a trainer's retrieval map — Laura-Trainer writes <name>-rag\\
+        index.json + images\\ + embeddings.safetensors beside <name>.
+        safetensors: {"kind":"lora-retrieval-map","images_dir":"images",
+         "lora":<name, no extension>,"embeddings_file":..,"entries":
+         [{"index":0,"image":"0001.png","caption":"..."}]}
+
+    Both are normalised to the first shape. Every part is optional: a map
+    whose images didn't travel still contributes captions, one whose LoRA
+    isn't installed still guides with its images."""
+    mp = _ragmap_file(path)
+    data = json.loads(mp.read_text(encoding="utf-8"))
+    base = mp.resolve().parent
+    data["_file"], data["_base"] = str(mp), str(base)
+    data["_kind"] = "trainer" if (data.get("kind") == "lora-retrieval-map"
+                                  or "images_dir" in data) else "cbac"
+
+    # images: either spelling of the key, and tolerate it being absent or
+    # pointing at a folder that didn't travel with the map
+    rel = data.get("image_dir") or data.get("images_dir") or ""
+    img_dir = (base / rel) if rel else base
+    if not img_dir.is_dir():
+        img_dir = base / "images" if (base / "images").is_dir() else base
+    data["image_dir"] = str(img_dir)
     for e in data.get("entries", []):
         ip = Path(e.get("image", ""))
-        e["_path"] = str(ip if ip.is_absolute() else (img_dir / ip))
-    data["_base"] = str(base)
+        p = ip if ip.is_absolute() else (img_dir / ip)
+        if not p.exists() and (base / ip.name).exists():
+            p = base / ip.name          # images sitting beside the map
+        e["_path"] = str(p)
+        if not e.get("keywords"):
+            e["keywords"] = _caption_keywords(e.get("caption", ""))
+
+    if not data.get("name"):
+        stem = base.name if mp.name.lower() == "index.json" \
+            else mp.name.split(".")[0]
+        data["name"] = re.sub(r"[-_]rag$", "", stem, flags=re.I) or stem
+
+    # the paired LoRA: trainers name it without the extension, and the
+    # file itself usually sits in the map's folder or just above it
+    lora = str(data.get("lora") or "").strip()
+    if lora:
+        if not lora.lower().endswith(".safetensors"):
+            lora += ".safetensors"
+        data["lora"] = lora
+        for cand in (base / lora, base.parent / lora):
+            if cand.exists():
+                data["_lora_src"] = str(cand)
+                break
+
+    # optional CLIP embeddings — nested {"embeddings": {"file":..,"key":..}}
+    # or the flat embeddings_file/embeddings_key pair
+    data["_emb"] = None
+    spec = data.get("embeddings")
+    if not isinstance(spec, dict):
+        spec = {"file": data.get("embeddings_file"),
+                "key": data.get("embeddings_key")}
+    ef = spec.get("file")
+    if ef and (base / ef).exists():
+        m = _read_safetensors_f32(base / ef,
+                                  spec.get("key") or "image_embeddings")
+        if m is not None and len(m) == len(data.get("entries", [])):
+            data["_emb"] = m        # row i belongs to entry i
     return data
 
 
-def ragmap_retrieve(ragmap, prompt, k=None):
+def ragmap_lora(ragmap, installed=None):
+    """The paired LoRA as it is actually installed here (tolerating case
+    and a missing .safetensors), or "" when it isn't on this machine —
+    the map is still usable without it."""
+    want = str((ragmap or {}).get("lora") or "").strip()
+    if not want:
+        return ""
+    stem = Path(want).stem.lower()
+    for name in (list_loras() if installed is None else installed):
+        if Path(name).stem.lower() == stem:
+            return name
+    return ""
+
+
+def ragmap_retrieve(ragmap, prompt, k=None, require_image=True):
     """Return the top-k entries whose keywords/caption best match the
     prompt words (falls back to the first k valid entries if nothing
-    matches, so the LoRA always gets representative guidance)."""
+    matches, so the LoRA always gets representative guidance). When the
+    map ships CLIP embeddings, an entry that is a near-duplicate of one
+    already picked is skipped, so the k references actually differ.
+    require_image=False also considers entries whose image is missing —
+    those can still be used as caption text."""
     if not ragmap:
         return []
-    k = k or int(ragmap.get("top_k", 4))
+    k = k or int(ragmap.get("top_k") or 4)
     words = set(re.findall(r"[a-z0-9]+", (prompt or "").lower()))
     scored = []
-    for e in ragmap.get("entries", []):
-        if not Path(e.get("_path", "")).exists():
+    for i, e in enumerate(ragmap.get("entries", [])):
+        if require_image and not Path(e.get("_path", "")).exists():
             continue
         text = " ".join(e.get("keywords", [])) + " " + e.get("caption", "")
         ewords = set(re.findall(r"[a-z0-9]+", text.lower()))
-        scored.append((len(words & ewords), e))
+        scored.append((len(words & ewords), i, e))
     scored.sort(key=lambda t: t[0], reverse=True)   # stable → original order on ties
-    return [e for _s, e in scored[:k]]
+    return _rag_diverse([(i, e) for _s, i, e in scored], ragmap.get("_emb"), k)
+
+
+def _rag_diverse(cands, emb, k):
+    """Take k entries off the ranked list, skipping ones that look like a
+    picture already taken. Tops up in rank order if that left too few."""
+    if emb is None:
+        return [e for _i, e in cands[:k]]
+    picked, vecs = [], []
+    for i, e in cands:
+        if len(picked) >= k:
+            break
+        v = emb[i] if i < len(emb) else None
+        if v is not None and any(float(v @ r) > RAG_DUP_SIM for r in vecs):
+            continue
+        picked.append(e)
+        if v is not None:
+            vecs.append(v)
+    for _i, e in cands:
+        if len(picked) >= k:
+            break
+        if e not in picked:
+            picked.append(e)
+    return picked
+
+
+# ---- optional prompt enhancer (Ollama) ---------------------------------
+# Strictly optional and never installed by this app: if Ollama isn't
+# running, the button explains what it is once and everything else works
+# exactly as before. No new Python dependency — plain HTTP over requests.
+ENHANCE_SYSTEM = (
+    "You rewrite prompts for a comic-book art image generator. Reply with "
+    "ONE line: the rewritten prompt as comma-separated visual phrases. No "
+    "preamble, no quotes, no explanation, no line breaks. Keep every "
+    "subject, character and action the user named, and add only visual "
+    "detail: composition, camera angle, lighting, colour, linework, "
+    "materials, mood. Never add text, captions, speech balloons, logos or "
+    "watermarks. Aim for 40-70 words.")
+_ENHANCE_LEAD = re.compile(
+    r"^\s*(sure|certainly|of course|here(?:'s| is| you go)|okay|ok|"
+    r"(?:enhanced|rewritten|improved|final)?\s*prompt)\b[^:]{0,40}:\s*", re.I)
+
+
+def _ollama_url():
+    """Ollama's endpoint, honouring OLLAMA_HOST (which is often set as a
+    bare host:port, without a scheme)."""
+    h = (os.environ.get("OLLAMA_HOST") or "127.0.0.1:11434").strip()
+    if not h.startswith(("http://", "https://")):
+        h = "http://" + h
+    return h.rstrip("/")
+
+
+def ollama_models(timeout=2):
+    """The models installed in Ollama, or [] when it isn't running. Never
+    raises — an absent optional feature must not surface as an error."""
+    try:
+        r = requests.get(f"{_ollama_url()}/api/tags", timeout=timeout)
+        r.raise_for_status()
+        return sorted(m["name"] for m in r.json().get("models", [])
+                      if m.get("name"))
+    except Exception:
+        return []
+
+
+def _clean_enhanced(out, original):
+    """Models like to answer in prose. Strip any reasoning block, take the
+    longest line, drop the "Sure, here's..." lead-in and stray quoting.
+    Returns "" if what came back is too thin to be an improvement."""
+    out = re.sub(r"(?s)<think>.*?</think>", " ", out or "")
+    lines = [ln.strip(" \t-*•\"'") for ln in out.splitlines()]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+    best = _ENHANCE_LEAD.sub("", max(lines, key=len)).strip(" \t-*•\"'")
+    return best if len(best) >= max(12, len(original.strip()) // 2) else ""
+
+
+def ollama_enhance(text, model, style="", timeout=120):
+    """Expand a short prompt into a fuller one with a local Ollama model."""
+    ask = f"Rewrite this image prompt: {text.strip()}"
+    if style.strip():
+        ask += f"\nStay within this house style: {style.strip()}"
+    r = requests.post(f"{_ollama_url()}/api/generate", timeout=timeout,
+                      json={"model": model, "prompt": ask,
+                            "system": ENHANCE_SYSTEM, "stream": False,
+                            "options": {"temperature": 0.8}})
+    if r.status_code == 404:
+        raise RuntimeError(f"Ollama has no model called '{model}'. "
+                           f"Install it with:  ollama pull {model}")
+    r.raise_for_status()
+    return _clean_enhanced(r.json().get("response", ""), text)
 
 
 def make_collage(paths, w, h):
@@ -1692,6 +1916,8 @@ class App:
         self._batch_active = False
         self.ragmap = None         # loaded RAG map (dict) or None
         self.ragmap_path = None
+        self._ollama_models = []   # models found in a local Ollama, if any
+        self._want_ollama_model = ""   # the one restored from settings
         self._auto_negative = None  # last negative set by a preset (vs typed)
         self._model_display = {}    # "name · 6.5 GB" -> raw filename
         self._pending_loras = set()
@@ -1713,6 +1939,7 @@ class App:
         root.after(100, self._poll_queue)
         threading.Thread(target=self._boot_engine, daemon=True).start()
         threading.Thread(target=self._check_updates_bg, daemon=True).start()
+        threading.Thread(target=self._probe_ollama, daemon=True).start()
         if self.vram_gb is not None:
             threading.Thread(target=self._vram_poll, daemon=True).start()
         root.after(600, self._first_run_check)
@@ -1869,7 +2096,25 @@ class App:
 
         ttk.Label(left, text="PROMPT", style="Head.TLabel").grid(row=r, sticky=W); r += 1
         self.prompt_box = self._text(left, 6)
-        self.prompt_box.grid(row=r, sticky=NSEW, pady=(2, 8)); r += 1
+        self.prompt_box.grid(row=r, sticky=NSEW, pady=(2, 2)); r += 1
+
+        # optional prompt enhancer — only lights up if Ollama is running
+        erow = ttk.Frame(left); erow.grid(row=r, sticky="ew", pady=(0, 8))
+        r += 1
+        erow.columnconfigure(1, weight=1)
+        self.enhance_btn = ttk.Button(erow, text="✨ Enhance", width=11,
+                                      command=self._enhance_prompt)
+        self.enhance_btn.grid(row=0, column=0)
+        self.ollama_var = StringVar()
+        self.ollama_dd = ttk.Combobox(erow, textvariable=self.ollama_var,
+                                      state="readonly", exportselection=False,
+                                      values=[], width=18)
+        self.ollama_dd.grid(row=0, column=1, sticky="ew", padx=6)
+        self.undo_enhance_btn = ttk.Button(erow, text="↩", width=3,
+                                           command=self._undo_enhance)
+        self.undo_enhance_btn.grid(row=0, column=2)
+        self.undo_enhance_btn.state(["disabled"])
+        self._prompt_undo = None
 
         ttk.Label(left, text="NEGATIVE PROMPT (kept until you clear it)",
                   style="Head.TLabel").grid(row=r, sticky=W); r += 1
@@ -2395,12 +2640,13 @@ class App:
         return [self.lora_list.get(i) for i in self.lora_list.curselection()]
 
     def _pick_ragmap(self):
-        """Load a .ragmap.json (paired with a trained LoRA). At generation
-        the app retrieves the closest example images and feeds them as
-        IP-Adapter visual guidance alongside the LoRA."""
+        """Load a RAG map — this app's .ragmap.json, or the retrieval map
+        a trainer writes beside a finished LoRA (<name>-rag\\index.json).
+        At generation the app retrieves the closest example images and
+        feeds them as IP-Adapter visual guidance alongside the LoRA."""
         path = filedialog.askopenfilename(
-            title="Load RAG map",
-            filetypes=[("RAG map", "*.ragmap.json"),
+            title="Load RAG map (.ragmap.json, or a trainer's index.json)",
+            filetypes=[("RAG map", ("*.ragmap.json", "index.json")),
                        ("JSON", "*.json"), ("All files", "*.*")])
         if not path:
             return
@@ -2409,25 +2655,45 @@ class App:
         except Exception as e:
             messagebox.showerror("RAG map", f"Could not read the RAG map: {e}")
             return
-        n = len([e for e in rag.get("entries", [])
-                 if Path(e.get("_path", "")).exists()])
-        if not n:
+        entries = rag.get("entries", [])
+        n = len([e for e in entries if Path(e.get("_path", "")).exists()])
+        caps = len([e for e in entries if e.get("caption")])
+        if not n and not caps:
             messagebox.showwarning(
-                "RAG map", "This RAG map has no usable images (the entry "
-                "image paths don't resolve next to the map file).")
+                "RAG map", "This RAG map has nothing usable in it — no images "
+                "resolve next to the map file, and it carries no captions.")
             return
         self.ragmap = rag
         self.ragmap_path = path
-        lora = rag.get("lora", "")
+        notes = []
+        # the paired LoRA: use it if installed; offer to copy it in when
+        # the map was written next to it; otherwise carry on without it
+        lora = ragmap_lora(rag)
+        if not lora and rag.get("lora"):
+            src = rag.get("_lora_src")
+            if src and Path(src).exists() and messagebox.askyesno(
+                    "Install the paired LoRA",
+                    f"This map was trained with {Path(src).name}, which isn't "
+                    "in your LoRA folder yet.\n\nCopy it in now? (Without it "
+                    "the map still guides with its example images.)"):
+                try:
+                    shutil.copy2(src, _ensure_lora_dir() / Path(src).name)
+                    self._pending_loras = getattr(
+                        self, "_pending_loras", set()) | {Path(src).name}
+                    self._refresh_models()
+                    lora = ragmap_lora(rag)
+                except OSError as e:
+                    notes.append(f"couldn't copy the LoRA in ({e})")
+            if not lora:
+                notes.append(f"paired LoRA '{rag['lora']}' isn't installed — "
+                             "add it with ➕ Add LoRA file")
+        if not n:
+            notes.append(f"no images travelled with this map — its {caps} "
+                         "captions will be used as text instead")
         self.ragmap_var.set(
             f"{rag.get('name', Path(path).stem)} — {n} imgs"
             + (f" · LoRA {lora}" if lora else ""))
-        # nudge if the paired LoRA isn't installed / IP-Adapter not ready
-        notes = []
-        if lora and lora not in list_loras():
-            notes.append(f"paired LoRA '{lora}' isn't installed — add it "
-                         "with ➕ Add LoRA file")
-        if not self._style_support_ok():
+        if n and not self._style_support_ok():
             if messagebox.askyesno(
                     "Enable image guidance",
                     "RAG image guidance uses IP-Adapter, which isn't set up "
@@ -2442,6 +2708,65 @@ class App:
             self.status_var.set(
                 f"RAG map '{rag.get('name', '')}' loaded — its example "
                 "images will guide generations on SDXL models.")
+        self._schedule_persist()
+
+    def _probe_ollama(self):
+        """Look for a local Ollama once at startup, off the UI thread."""
+        self.ui_queue.put(("ollama", ollama_models()))
+
+    def _on_ollama_found(self, models):
+        self._ollama_models = models
+        self.ollama_dd["values"] = models
+        if models:
+            want = self._want_ollama_model
+            self.ollama_var.set(want if want in models else models[0])
+        else:
+            self.ollama_var.set("")
+
+    def _enhance_prompt(self):
+        """Rewrite the prompt with a local Ollama model. Explains itself
+        once if Ollama isn't there — it is never required or installed."""
+        if not getattr(self, "_ollama_models", None):
+            # re-probe first: they may have started Ollama since launch
+            found = ollama_models()
+            if found:
+                self._on_ollama_found(found)
+            else:
+                messagebox.showinfo(
+                    "Prompt enhancer (optional)",
+                    "This button expands a short prompt into a fuller one "
+                    "using Ollama — a free local LLM runner that keeps "
+                    "everything on your machine.\n\nIt isn't running here, "
+                    "and this app never installs it. If you want it: get "
+                    "Ollama from ollama.com, run  ollama pull llama3.2  "
+                    "(or any model), then press ✨ Enhance again.\n\n"
+                    "Everything else in the app works without it.")
+                return
+        text = self._get(self.prompt_box).strip()
+        if not text:
+            self.status_var.set("Type a prompt first, then press ✨ Enhance.")
+            return
+        model = self.ollama_var.get() or self._ollama_models[0]
+        self.enhance_btn.state(["disabled"])
+        self.status_var.set(f"Enhancing the prompt with {model}…")
+        style = self._get(self.style_box)
+        threading.Thread(target=self._run_enhance,
+                         args=(text, model, style), daemon=True).start()
+
+    def _run_enhance(self, text, model, style):
+        try:
+            better = ollama_enhance(text, model, style)
+            self.ui_queue.put(("enhanced", text, better))
+        except Exception as e:
+            self.ui_queue.put(("enhance_err", str(e)))
+
+    def _undo_enhance(self):
+        if self._prompt_undo is None:
+            return
+        self._set(self.prompt_box, self._prompt_undo)
+        self._prompt_undo = None
+        self.undo_enhance_btn.state(["disabled"])
+        self.status_var.set("Prompt restored.")
         self._schedule_persist()
 
     def _clear_ragmap(self):
@@ -2534,6 +2859,7 @@ class App:
             "transparent": self.transparent_var.get(),
             "upscale": self.upscale_var.get(),
             "ragmap_path": self.ragmap_path,
+            "ollama_model": self.ollama_var.get(),
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
             "auto_negative": self._auto_negative,
@@ -2616,6 +2942,11 @@ class App:
             self.batch_var.set(st.get("batch", 1))
             self.transparent_var.set(st.get("transparent", False))
             self.upscale_var.set(st.get("upscale", False))
+            # the probe runs in the background, so remember the wanted
+            # model and select it once the list arrives
+            self._want_ollama_model = st.get("ollama_model", "") or ""
+            if self._want_ollama_model:
+                self.ollama_var.set(self._want_ollama_model)
             rmp = st.get("ragmap_path")
             if rmp and Path(rmp).exists():
                 try:
@@ -3339,24 +3670,29 @@ class App:
                                     "this Flux model.")
             else:
                 hits = ragmap_retrieve(self.ragmap, prompt)
-                rag_weight = float(self.ragmap.get("weight", 0.8))
-                lf = self.ragmap.get("lora", "")
-                if lf and lf in list_loras() and \
-                        lf not in [n for n, _s in loras]:
+                rag_weight = float(self.ragmap.get("weight") or 0.8)
+                lf = ragmap_lora(self.ragmap)
+                if lf and lf not in [n for n, _s in loras]:
                     loras.append((lf, strength))
                 trg = self.ragmap.get("trigger", "")
                 if trg and trg.lower() not in full_prompt.lower():
                     full_prompt = f"{trg}, {full_prompt}"
-                if self._style_support_ok():
+                if hits and self._style_support_ok():
                     rag_refs = [h["_path"] for h in hits]
                 else:
-                    caps = "; ".join(h.get("caption", "") for h in hits
+                    # no IP-Adapter, or the images didn't travel with the
+                    # map — use what is there, which is the captions
+                    text_hits = hits or ragmap_retrieve(
+                        self.ragmap, prompt, require_image=False)
+                    caps = "; ".join(h.get("caption", "") for h in text_hits
                                      if h.get("caption"))
                     if caps:
                         full_prompt = f"{full_prompt}, {caps}"
-                    self.status_var.set("RAG map applied as text (install "
-                                        "IP-Adapter via 🧭 RAG map… for image "
-                                        "guidance).")
+                    self.status_var.set(
+                        "RAG map applied as text "
+                        + ("(this map carries no images)." if not hits else
+                           "(install IP-Adapter via 🧭 RAG map… for image "
+                           "guidance)."))
 
         w, h = SIZE_PRESETS[self.size_var.get()]
         try:
@@ -3475,6 +3811,25 @@ class App:
                         f"GPU {used:,} / {total:,} MB")
                 elif kind == "models_changed":
                     self._refresh_models()
+                elif kind == "ollama":
+                    self._on_ollama_found(msg[1])
+                elif kind == "enhanced":
+                    _, before, better = msg
+                    self.enhance_btn.state(["!disabled"])
+                    if better:
+                        self._prompt_undo = before
+                        self._set(self.prompt_box, better)
+                        self.undo_enhance_btn.state(["!disabled"])
+                        self.status_var.set(
+                            "Prompt enhanced — ↩ puts your wording back.")
+                        self._schedule_persist()
+                    else:
+                        self.status_var.set(
+                            "The model didn't return a usable prompt — your "
+                            "wording is unchanged. Try a different model.")
+                elif kind == "enhance_err":
+                    self.enhance_btn.state(["!disabled"])
+                    self.status_var.set(f"Prompt enhancer: {msg[1]}")
                 elif kind == "app_update":
                     info = msg[1]
                     if messagebox.askyesno(

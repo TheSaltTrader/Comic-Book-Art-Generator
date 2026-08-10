@@ -5,6 +5,9 @@ python/
 models/
 dist_app/
 dist_setup/
+build_app/
+build_setup/
+engine_owner.json
 _setup_tmp/
 _upd_tmp/
 
