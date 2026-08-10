@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.11.3 — 2026-08-09
+- Simplified the editor checkbox label to just "Output at Canvas size".
+- The Border maker now has its own **Variations (1-10)** control, so one
+  prompt can auto-generate several borders (each a different seed) to
+  pick the best from. Previously borders quietly used the main section's
+  Variations value; now it's a dedicated, persisted setting in the
+  Border section.
+
 ## v1.11.2 — 2026-08-09
 - Removed the in-app LoRA training feature to keep the app simple and
   fully self-contained (it was the only feature that needed extra tools

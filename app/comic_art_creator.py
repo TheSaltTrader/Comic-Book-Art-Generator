@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1983,9 +1983,7 @@ class App:
                             lambda _e: self._on_editor_pick())
         self._refresh_editor_list()
         self.editor_canvas_var = BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Output at canvas size (re-stage into "
-                                   "the size selected below instead of "
-                                   "keeping the image's size)",
+        ttk.Checkbutton(left, text="Output at Canvas size",
                         variable=self.editor_canvas_var).grid(
             row=r, sticky=W); r += 1
         self.change_var = DoubleVar(value=60)   # border-ref influence
@@ -2192,6 +2190,16 @@ class App:
         self.border_thick_var.trace_add(
             "write", lambda *_a: self.border_thick_lab.config(
                 text=f"{int(self.border_thick_var.get())}%"))
+        bvrow = ttk.Frame(left); bvrow.grid(row=r, sticky=NSEW, pady=2); r += 1
+        ttk.Label(bvrow, text="Variations", style="Dim.TLabel").pack(
+            side="left")
+        self.border_batch_var = IntVar(value=1)
+        ttk.Spinbox(bvrow, from_=1, to=10, textvariable=self.border_batch_var,
+                    exportselection=False, width=4).pack(side="left",
+                                                         padx=(6, 0))
+        ttk.Label(bvrow, text="(makes several borders from one prompt so you "
+                             "can pick the best)", style="Dim.TLabel").pack(
+            side="left", padx=(8, 0))
         self.border_clean_var = BooleanVar(value=True)
         ttk.Checkbutton(left, text="Auto-clean center (2nd pass with Flux "
                                    "Kontext when a theme fills the middle)",
@@ -2401,6 +2409,7 @@ class App:
             "border_aspect": self.border_aspect_var.get(),
             "border_thick": int(self.border_thick_var.get()),
             "border_clean": self.border_clean_var.get(),
+            "border_batch": self.border_batch_var.get(),
             "size": self.size_var.get(),
             "steps": self.steps_var.get(),
             "batch": self.batch_var.get(),
@@ -2481,6 +2490,7 @@ class App:
                 self.border_aspect_var.set(st["border_aspect"])
             self.border_thick_var.set(st.get("border_thick", 14))
             self.border_clean_var.set(st.get("border_clean", True))
+            self.border_batch_var.set(st.get("border_batch", 1))
             if st.get("size") in SIZE_PRESETS:
                 self.size_var.set(st["size"])
             self.steps_var.set(st.get("steps", "auto"))
@@ -2509,7 +2519,7 @@ class App:
                     self.border_auto_var, self.border_aspect_var,
                     self.border_model_var, self.border_style_var,
                     self.border_thick_var, self.border_clean_var,
-                    self.anim_secs_var,
+                    self.border_batch_var, self.anim_secs_var,
                     self.anim_keep_var, self.anim_loop_var,
                     self.anim_size_var, self.anim_transparent_var,
                     self.anim_motion_var, self.anim_gif_var,
@@ -3648,7 +3658,7 @@ class App:
             prompt=prompt, user_prompt=theme, style="border frame",
             negative=BORDER_NEGATIVE, model=model, loras=loras,
             width=w, height=h, seed=seed, steps=steps, cfg=None,
-            batch=max(1, min(10, self.batch_var.get())),
+            batch=max(1, min(10, self.border_batch_var.get())),
             random_seed=self.random_seed_var.get(),
             transparent=False, preset="border maker",
             upscale=self.upscale_var.get(),
