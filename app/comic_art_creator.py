@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.12.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1432,6 +1432,42 @@ class ChannelQueue:
             self.q.put(msg)
 
 
+def load_ragmap(path):
+    """Load a .ragmap.json produced alongside a trained LoRA. Resolves
+    each entry's image to an absolute path (relative to the map file /
+    its image_dir). Schema — cbac-ragmap/1:
+      {"schema":"cbac-ragmap/1","name":..,"lora":<file>,"trigger":<word>,
+       "image_dir":"images","weight":0.8,"top_k":4,
+       "entries":[{"image":"0001.png","keywords":[...],"caption":"..."}]}"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    base = Path(path).resolve().parent
+    img_dir = base / data.get("image_dir", "")
+    for e in data.get("entries", []):
+        ip = Path(e.get("image", ""))
+        e["_path"] = str(ip if ip.is_absolute() else (img_dir / ip))
+    data["_base"] = str(base)
+    return data
+
+
+def ragmap_retrieve(ragmap, prompt, k=None):
+    """Return the top-k entries whose keywords/caption best match the
+    prompt words (falls back to the first k valid entries if nothing
+    matches, so the LoRA always gets representative guidance)."""
+    if not ragmap:
+        return []
+    k = k or int(ragmap.get("top_k", 4))
+    words = set(re.findall(r"[a-z0-9]+", (prompt or "").lower()))
+    scored = []
+    for e in ragmap.get("entries", []):
+        if not Path(e.get("_path", "")).exists():
+            continue
+        text = " ".join(e.get("keywords", [])) + " " + e.get("caption", "")
+        ewords = set(re.findall(r"[a-z0-9]+", text.lower()))
+        scored.append((len(words & ewords), e))
+    scored.sort(key=lambda t: t[0], reverse=True)   # stable → original order on ties
+    return [e for _s, e in scored[:k]]
+
+
 def make_collage(paths, w, h):
     """Compose the reference image(s) onto one w x h canvas — a lone ref
     is letterboxed, several tile in a grid. The editor redraws this
@@ -1479,6 +1515,18 @@ class Generator:
             else:
                 params["edit_image_names"] = [self._upload_ref(rp)
                                               for rp in params["ref_images"]]
+        # RAG map: upload the retrieved example images so build_graph can
+        # feed them through IP-Adapter as visual guidance
+        if params.get("rag_ref_paths"):
+            names = []
+            for rp in params["rag_ref_paths"]:
+                try:
+                    if Path(rp).exists():
+                        names.append(self._upload_ref(rp))
+                except Exception:
+                    pass
+            if names:
+                params["style_ref_names"] = names
         # prompt-only borders now generate the FULL frame (no restrictive
         # edge-band mask): the model/LoRA draws a complete ornate frame
         # with a plain center, and cut_center carves the center transparent
@@ -1642,6 +1690,8 @@ class App:
         self.busy = False
         self.job_queue = []        # batch queue of pending jobs
         self._batch_active = False
+        self.ragmap = None         # loaded RAG map (dict) or None
+        self.ragmap_path = None
         self._auto_negative = None  # last negative set by a preset (vs typed)
         self._model_display = {}    # "name · 6.5 GB" -> raw filename
         self._pending_loras = set()
@@ -1905,6 +1955,18 @@ class App:
         self.lora_strength.trace_add(
             "write", lambda *_a: self.lora_strength_lab.config(
                 text=f"{self.lora_strength.get():.2f}"))
+        # RAG map — pairs example images with a LoRA; retrieves the closest
+        # ones as visual guidance (IP-Adapter) at generation time
+        ragrow = ttk.Frame(left); ragrow.grid(row=r, sticky=NSEW, pady=(2, 0))
+        r += 1
+        ragrow.columnconfigure(1, weight=1)
+        ttk.Button(ragrow, text="🧭 RAG map…", width=12,
+                   command=self._pick_ragmap).grid(row=0, column=0)
+        self.ragmap_var = StringVar(value="none")
+        ttk.Label(ragrow, textvariable=self.ragmap_var, style="Dim.TLabel",
+                  wraplength=230).grid(row=0, column=1, sticky=W, padx=6)
+        ttk.Button(ragrow, text="✕", width=3,
+                   command=self._clear_ragmap).grid(row=0, column=2)
 
         # size + settings
         ttk.Label(left, text="CANVAS & SETTINGS", style="Head.TLabel").grid(
@@ -2332,6 +2394,62 @@ class App:
     def _selected_loras(self):
         return [self.lora_list.get(i) for i in self.lora_list.curselection()]
 
+    def _pick_ragmap(self):
+        """Load a .ragmap.json (paired with a trained LoRA). At generation
+        the app retrieves the closest example images and feeds them as
+        IP-Adapter visual guidance alongside the LoRA."""
+        path = filedialog.askopenfilename(
+            title="Load RAG map",
+            filetypes=[("RAG map", "*.ragmap.json"),
+                       ("JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            rag = load_ragmap(path)
+        except Exception as e:
+            messagebox.showerror("RAG map", f"Could not read the RAG map: {e}")
+            return
+        n = len([e for e in rag.get("entries", [])
+                 if Path(e.get("_path", "")).exists()])
+        if not n:
+            messagebox.showwarning(
+                "RAG map", "This RAG map has no usable images (the entry "
+                "image paths don't resolve next to the map file).")
+            return
+        self.ragmap = rag
+        self.ragmap_path = path
+        lora = rag.get("lora", "")
+        self.ragmap_var.set(
+            f"{rag.get('name', Path(path).stem)} — {n} imgs"
+            + (f" · LoRA {lora}" if lora else ""))
+        # nudge if the paired LoRA isn't installed / IP-Adapter not ready
+        notes = []
+        if lora and lora not in list_loras():
+            notes.append(f"paired LoRA '{lora}' isn't installed — add it "
+                         "with ➕ Add LoRA file")
+        if not self._style_support_ok():
+            if messagebox.askyesno(
+                    "Enable image guidance",
+                    "RAG image guidance uses IP-Adapter, which isn't set up "
+                    "yet (a ~1 GB one-time download).\n\nInstall it now? "
+                    "(Without it, the RAG map still helps by adding its "
+                    "captions to your prompt as text.)"):
+                threading.Thread(target=self._install_style_support,
+                                 daemon=True).start()
+        if notes:
+            self.status_var.set("RAG map loaded. " + "; ".join(notes))
+        else:
+            self.status_var.set(
+                f"RAG map '{rag.get('name', '')}' loaded — its example "
+                "images will guide generations on SDXL models.")
+        self._schedule_persist()
+
+    def _clear_ragmap(self):
+        self.ragmap = None
+        self.ragmap_path = None
+        self.ragmap_var.set("none")
+        self._schedule_persist()
+
     def _import_lora(self):
         """Browse for .safetensors LoRA file(s), copy them into
         models\\loras, then refresh the list and tick the new ones."""
@@ -2415,6 +2533,7 @@ class App:
             "batch": self.batch_var.get(),
             "transparent": self.transparent_var.get(),
             "upscale": self.upscale_var.get(),
+            "ragmap_path": self.ragmap_path,
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
             "auto_negative": self._auto_negative,
@@ -2497,6 +2616,15 @@ class App:
             self.batch_var.set(st.get("batch", 1))
             self.transparent_var.set(st.get("transparent", False))
             self.upscale_var.set(st.get("upscale", False))
+            rmp = st.get("ragmap_path")
+            if rmp and Path(rmp).exists():
+                try:
+                    self.ragmap = load_ragmap(rmp)
+                    self.ragmap_path = rmp
+                    nm = self.ragmap.get("name", Path(rmp).stem)
+                    self.ragmap_var.set(f"{nm} (loaded)")
+                except Exception:
+                    self.ragmap = None
             self.seed_var.set(st.get("seed", "0"))
             self.random_seed_var.set(st.get("random_seed", True))
             self._auto_negative = st.get("auto_negative")
@@ -3198,6 +3326,38 @@ class App:
         loras = [] if self.ref_paths else \
             [(name, strength) for name in self._selected_loras()]
 
+        # RAG map: retrieve the closest example images for this prompt and
+        # feed them as IP-Adapter guidance (SDXL only); auto-apply the
+        # paired LoRA + trigger. Falls back to caption text if IP-Adapter
+        # isn't installed. Only in plain generation (not editing).
+        rag_refs = []
+        rag_weight = 0.8
+        if self.ragmap and not editing:
+            if model_family(model) in ("flux", "schnell"):
+                self.status_var.set("RAG image guidance needs an SDXL model "
+                                    "(Juggernaut/DreamShaper) — skipped for "
+                                    "this Flux model.")
+            else:
+                hits = ragmap_retrieve(self.ragmap, prompt)
+                rag_weight = float(self.ragmap.get("weight", 0.8))
+                lf = self.ragmap.get("lora", "")
+                if lf and lf in list_loras() and \
+                        lf not in [n for n, _s in loras]:
+                    loras.append((lf, strength))
+                trg = self.ragmap.get("trigger", "")
+                if trg and trg.lower() not in full_prompt.lower():
+                    full_prompt = f"{trg}, {full_prompt}"
+                if self._style_support_ok():
+                    rag_refs = [h["_path"] for h in hits]
+                else:
+                    caps = "; ".join(h.get("caption", "") for h in hits
+                                     if h.get("caption"))
+                    if caps:
+                        full_prompt = f"{full_prompt}, {caps}"
+                    self.status_var.set("RAG map applied as text (install "
+                                        "IP-Adapter via 🧭 RAG map… for image "
+                                        "guidance).")
+
         w, h = SIZE_PRESETS[self.size_var.get()]
         try:
             seed = int(self.seed_var.get())
@@ -3217,6 +3377,7 @@ class App:
                       upscale=self.upscale_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
+                      rag_ref_paths=rag_refs, style_weight=rag_weight,
                       editor=editor,
                       out_size=(w, h) if editing
                       and self.editor_canvas_var.get() else None,

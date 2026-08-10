@@ -1,5 +1,15 @@
 # Changelog — Comic Book Art Creator
 
+## v1.12.0 — 2026-08-10
+- **RAG maps.** New "🧭 RAG map…" button in the first section loads a
+  `.ragmap.json` produced alongside a trained LoRA (see RAGMAP.md for the
+  format). At generation it retrieves the example images most relevant to
+  your prompt and feeds them as IP-Adapter visual guidance, while
+  auto-applying the paired LoRA and trigger word — so results stay
+  faithful to what the LoRA was trained on. SDXL models only; offers a
+  one-time IP-Adapter download, and falls back to caption text if it's
+  not installed. The loaded map is remembered between sessions.
+
 ## v1.11.3 — 2026-08-09
 - Simplified the editor checkbox label to just "Output at Canvas size".
 - The Border maker now has its own **Variations (1-10)** control, so one
