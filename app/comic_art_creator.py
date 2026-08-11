@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.13.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -242,6 +242,35 @@ def engine_is_ours():
             capture_output=True, text=True, creationflags=NO_WINDOW,
             timeout=5).stdout
         return str(pid) in out
+    except Exception:
+        return False
+
+
+def _engine_owner_pid():
+    try:
+        return json.loads(
+            ENGINE_OWNER_FILE.read_text(encoding="utf-8"))["pid"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def engine_ours_to_stop():
+    """True when shutting the engine down is safe: either this process
+    started it, or the session that did has since died and left it
+    orphaned. An engine owned by another LIVE app window is left running
+    — engine_is_ours() calls that one "ours" too, which is fine for
+    trusting it but would be wrong for killing it."""
+    pid = _engine_owner_pid()
+    if pid is None:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True, creationflags=NO_WINDOW,
+            timeout=5).stdout
+        return str(pid) not in out      # owner gone: an orphan to clean up
     except Exception:
         return False
 
@@ -524,12 +553,23 @@ def apply_app_update(zip_url, status_cb):
 
 
 def kill_engine():
-    """Stop any running ComfyUI engine process (ours from this or a
-    previous session)."""
+    """Stop any ComfyUI engine belonging to THIS install (ours from this
+    or a previous session).
+
+    Matched on the project path, which the engine always carries in its
+    --extra-model-paths-config argument. Matching on "ComfyUI" instead
+    finds nothing: the engine is launched with cwd=ComfyUI and a bare
+    "main.py", so that word never appears in its command line — which is
+    how stale engines used to survive every restart and then hold port
+    8188 against the new one. .Contains() is used rather than -like so a
+    bracket in the path can't be read as a wildcard.
+    """
     subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-         "Where-Object { $_.CommandLine -like '*ComfyUI*main.py*' } | "
+         "Where-Object { $_.CommandLine -and "
+         f"$_.CommandLine.Contains('{PROJECT}') -and "
+         "$_.CommandLine.Contains('main.py') } | "
          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
         capture_output=True, creationflags=NO_WINDOW, timeout=60)
 
@@ -3003,9 +3043,23 @@ class App:
             pass
 
     def _on_close(self):
+        """Save, then take the engine down with us.
+
+        The engine is a separate process that keeps whatever model it last
+        loaded resident — up to ~17 GB of GPU memory after a Flux job. It
+        used to outlive every app session, so the card stayed occupied and
+        the stale engine went on holding port 8188 against the next
+        launch. An engine we did not start is left alone."""
         try:
             self._persist()
         finally:
+            try:
+                if engine_ours_to_stop():
+                    self.status_var.set("Closing the engine…")
+                    kill_engine()
+                    ENGINE_OWNER_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass          # never let cleanup stop the app from closing
             self.root.destroy()
 
     def _clear_all(self):

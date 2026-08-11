@@ -1,5 +1,24 @@
 # Changelog — Comic Book Art Creator
 
+## v1.13.1 — 2026-08-10
+- **Closing the app now frees your graphics card.** The engine is a
+  separate program that keeps the last model it used loaded — 7 GB after
+  an SDXL job, up to ~17 GB after a Flux one. It used to keep running
+  after you closed the window, so that memory stayed occupied until you
+  rebooted or hunted the process down, and the leftover engine went on
+  holding port 8188 against your next launch. Closing the window now
+  shuts it down as well, and a leftover engine from a session that
+  crashed is cleaned up too. An engine belonging to a second app window
+  you still have open is left alone.
+- **Fixed the stop-the-engine command, which never worked.** It looked
+  for processes whose command line contained "ComfyUI", but the engine is
+  started from inside that folder and its command line says only
+  "main.py" — so it matched nothing, every time. Anything that needed to
+  restart the engine (installing IP-Adapter, applying a model update,
+  repairing the model paths at startup) quietly failed to stop the old
+  one, then hit "port 8188 already in use" and carried on talking to the
+  stale engine. It now matches by this installation's own folder.
+
 ## v1.13.0 — 2026-08-10
 - **Prompt enhancer (optional, local).** A ✨ Enhance button under the
   prompt expands a few words into a full comic-art prompt using Ollama,
