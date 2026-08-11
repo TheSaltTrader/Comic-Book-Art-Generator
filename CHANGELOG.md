@@ -1,5 +1,27 @@
 # Changelog — Comic Book Art Creator
 
+## v1.15.0 — 2026-08-11
+- **Your setup is remembered properly.** Ticking a LoRA is now saved the
+  moment you do it, so the LoRAs you work with are still ticked next
+  time. A loaded RAG map and the prompt you last typed come back too.
+  (The LoRA list had no way to trigger a save, so the choice only
+  survived if some other setting happened to change before you closed.)
+- **Blue dividers between the sections** of the left panel, so picture
+  making, the image editor, the animator, the border maker and the batch
+  queue are told apart at a glance.
+- **Cancel now actually cancels.** Pressing ✕ during a Variations run
+  stopped the picture being drawn and then quietly started the next one —
+  so cancelling a set of six only ever skipped one picture. Measured on a
+  set of five: the old Cancel still produced four of them. The button now
+  stops the whole run at once: the current picture, the rest of the set,
+  and anything waiting in the batch queue. Pictures that had already
+  finished are kept, and the status line tells you where it stopped
+  ("Cancelled — stopped after 2 of 6").
+- Cancel is noticed within about a second instead of only between
+  pictures, the engine's own queue is cleared so nothing restarts behind
+  your back, and a border's automatic second pass and an animation's
+  post-processing both stop as well.
+
 ## v1.14.0 — 2026-08-11
 - **Add your own base model.** A new "📁 Add model…" button beside the
   model dropdown browses to any `.safetensors` on your disk — one you

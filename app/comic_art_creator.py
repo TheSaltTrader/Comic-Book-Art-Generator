@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -108,6 +108,7 @@ FG = "#e8e8f0"
 FG_DIM = "#9a9ab0"
 ACCENT = "#e94560"
 ACCENT2 = "#4ecca3"
+RULE = "#3d7dff"        # blue divider between the panel's major sections
 
 
 # --------------------------------------------------------------------------
@@ -1752,6 +1753,23 @@ def make_collage(paths, w, h):
     return canvas
 
 
+# One shared cancel flag. /interrupt only stops the job the engine is
+# running right now; a Variations run is a loop HERE that posts the next
+# prompt straight afterwards, so without this the set kept going and
+# "Cancel" only skipped one picture. Every worker loop checks it.
+CANCEL = threading.Event()
+
+
+def cancel_all():
+    """Stop the current job and anything queued behind it."""
+    CANCEL.set()
+    for path, payload in (("/interrupt", None), ("/queue", {"clear": True})):
+        try:
+            requests.post(f"{ENGINE_URL}{path}", json=payload, timeout=5)
+        except requests.RequestException:
+            pass
+
+
 class Generator:
     """Queues a prompt and streams progress/results back through a queue."""
 
@@ -1800,6 +1818,10 @@ class Generator:
                    timeout=30)
         try:
             for i in range(params["batch"]):
+                if CANCEL.is_set():
+                    self.q.put(("status", f"Cancelled — stopped after "
+                                          f"{i} of {params['batch']}."))
+                    break
                 p = dict(params)
                 if i > 0:
                     p["seed"] = random.randrange(2**32) if params["random_seed"] \
@@ -1831,6 +1853,12 @@ class Generator:
                 r.raise_for_status()
                 prompt_id = r.json()["prompt_id"]
                 images = self._await_images(ws, prompt_id)
+                if CANCEL.is_set():
+                    # interrupted mid-picture: nothing usable came back,
+                    # and the pictures already finished are kept
+                    self.q.put(("status", f"Cancelled — stopped after "
+                                          f"{i} of {params['batch']}."))
+                    break
                 for img_meta in images:
                     img = self._fetch_image(img_meta)
                     if params.get("border_clean") \
@@ -1847,6 +1875,8 @@ class Generator:
         run it through Flux Kontext to empty the center, keeping the
         frame. Returns the cleaned image, or the original on any failure
         so a border is never lost to the clean-up step."""
+        if CANCEL.is_set():
+            return img
         try:
             self.q.put(("status", "Cleaning the center (2nd pass, "
                                   "Flux Kontext)…"))
@@ -1895,10 +1925,23 @@ class Generator:
         return name
 
     def _await_images(self, ws, prompt_id, timeout=600):
-        ws.settimeout(timeout)
+        # short socket timeout so Cancel is noticed within a second rather
+        # than after the whole job — recv() would otherwise block for the
+        # full timeout and the cancelled run would carry on regardless
+        ws.settimeout(2)
+        deadline = time.time() + timeout
         loading_told = False
         while True:
-            msg = ws.recv()
+            if CANCEL.is_set():
+                return []
+            if time.time() > deadline:
+                raise TimeoutError("the engine stopped responding")
+            try:
+                msg = ws.recv()
+            except Exception as e:
+                if "timed out" in str(e).lower() or isinstance(e, TimeoutError):
+                    continue          # nothing this tick; check again
+                raise
             if isinstance(msg, bytes):
                 continue  # binary preview frames — ignored
             data = json.loads(msg)
@@ -2083,6 +2126,15 @@ class App:
                     troughcolor=BG2)
         s.configure("TSpinbox", padding=4)
         s.configure("TFrame", background=BG)
+
+    def _rule(self, parent, row):
+        """A blue divider marking where one section of the panel ends and
+        the next begins. Returns the next free grid row."""
+        # a Canvas, not a ttk widget: ttk styles cannot paint a plain
+        # coloured bar, and Canvas honours bg directly
+        Canvas(parent, height=3, bg=RULE, highlightthickness=0,
+               bd=0).grid(row=row, sticky="ew", pady=(16, 2))
+        return row + 1
 
     def _text(self, parent, height):
         return Text(parent, height=height, wrap=WORD, bg=BG3, fg=FG,
@@ -2300,6 +2352,7 @@ class App:
                    command=self._reuse_seed).grid(row=0, column=3, padx=(10, 0))
 
         # image editor — Gemini-style instruction editing
+        r = self._rule(left, r)
         ttk.Label(left, text="IMAGE EDITOR (optional — load image(s) and "
                              "your prompt edits them: change things, remove "
                              "text, move characters to new scenes)",
@@ -2363,6 +2416,7 @@ class App:
                   style="Dim.TLabel", wraplength=400).grid(row=r, sticky=W); r += 1
 
         # ---------- animator (old-school sprite animation) ----------
+        r = self._rule(left, r)
         ttk.Label(left, text="ANIMATOR — animate a character image into "
                              "sprite frames & GIF", style="Head.TLabel",
                   wraplength=400, justify="left").grid(
@@ -2467,6 +2521,7 @@ class App:
                                                          padx=(4, 0))
 
         # ---------- border maker (very bottom) ----------
+        r = self._rule(left, r)
         ttk.Label(left, text="BORDER MAKER — themed frame, transparent "
                              "center, no text", style="Head.TLabel").grid(
             row=r, sticky=W, pady=(14, 0)); r += 1
@@ -2576,6 +2631,7 @@ class App:
                                                          padx=(4, 0))
 
         # ---------- batch queue (very bottom) ----------
+        r = self._rule(left, r)
         self.queue_count_var = StringVar(value="Batch queue (0)")
         ttk.Label(left, textvariable=self.queue_count_var,
                   style="Head.TLabel").grid(row=r, sticky=W,
@@ -3118,12 +3174,17 @@ class App:
                     self.anim_size_var, self.anim_transparent_var,
                     self.anim_motion_var, self.anim_gif_var,
                     self.anim_zip_var, self.anim_sheet_var,
-                    self.anim_video_var):
+                    self.anim_video_var, self.ollama_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box, self.anim_prompt_box):
             box.bind("<KeyRelease>", self._schedule_persist)
             box.bind("<FocusOut>", self._schedule_persist)
+        # a Listbox has no variable to trace, so ticking a LoRA never
+        # scheduled a save — the choice survived only if some other
+        # setting happened to change before the app closed
+        self.lora_list.bind("<<ListboxSelect>>", self._schedule_persist,
+                            add="+")
 
     def _schedule_persist(self, *_a):
         if self._persist_job is not None:
@@ -3652,6 +3713,7 @@ class App:
         if self.busy and self._busy_guard():
             return
         self._batch_active = True
+        CANCEL.clear()
         self.busy = True
         self.go_btn.state(["disabled"])
         threading.Thread(target=self._queue_worker, daemon=True).start()
@@ -3661,6 +3723,10 @@ class App:
         total = len(jobs)
         try:
             for i, j in enumerate(jobs, 1):
+                if CANCEL.is_set():
+                    self.ui_queue.put(("status", f"Batch cancelled — "
+                                                 f"{i - 1} of {total} done."))
+                    break
                 self.ui_queue.put(("status", f"Batch {i}/{total}: "
                                              f"{j['label']}…"))
                 try:
@@ -3693,10 +3759,9 @@ class App:
                 "Generation in progress",
                 "A generation is still running (big models can take many "
                 "minutes — watch the progress bar).\n\nCancel it now?"):
-            try:
-                requests.post(f"{ENGINE_URL}/interrupt", timeout=5)
-            except requests.RequestException:
-                pass
+            cancel_all()
+            self.job_queue = []
+            self._refresh_queue()
             self.busy = False
             self.go_btn.state(["!disabled"])
             self.progress["value"] = 0
@@ -3705,14 +3770,14 @@ class App:
         return True
 
     def _cancel_generation(self):
-        """The ✕ Cancel next to each progress bar — stops the running
-        job (image, border or animation) and frees the buttons."""
+        """The ✕ Cancel next to each progress bar — stops the running job
+        (image, border or animation), the rest of a Variations set, and
+        anything left in the batch queue."""
         if not self.busy:
             return
-        try:
-            requests.post(f"{ENGINE_URL}/interrupt", timeout=5)
-        except requests.RequestException:
-            pass
+        cancel_all()
+        self.job_queue = []
+        self._refresh_queue()
         self.busy = False
         self.go_btn.state(["!disabled"])
         for bar, var in ((self.progress, self.pct_var),
@@ -3878,6 +3943,7 @@ class App:
         if queue:
             self._enqueue("gen", (prompt or "art")[:38], params)
             return
+        CANCEL.clear()
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
@@ -4340,6 +4406,7 @@ class App:
         if queue:
             self._enqueue("border", "border: " + theme[:30], params)
             return
+        CANCEL.clear()
         self.busy = True
         self.go_btn.state(["disabled"])
         self.border_progress["value"] = 0
@@ -4576,6 +4643,7 @@ class App:
         if queue:
             self._enqueue("anim", "anim: " + action[:30], p)
             return
+        CANCEL.clear()
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
@@ -4633,6 +4701,9 @@ class App:
                 metas = gen._await_images(ws, pid, timeout=2400)  # live %
             finally:
                 ws.close()
+            if CANCEL.is_set():
+                status("Cancelled — the animation was stopped.")
+                return
             if not metas:
                 raise RuntimeError("animation produced no frames")
             status(f"Fetching {len(metas)} frames…")
