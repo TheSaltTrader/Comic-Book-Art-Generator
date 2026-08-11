@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.13.1"
+APP_VERSION = "1.14.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2174,6 +2174,9 @@ class App:
                            lambda _e: self._on_model_pick())
         ttk.Button(mrow, text="↻", width=3,
                    command=self._refresh_models).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(mrow, text="📁 Add model…", width=13,
+                   command=self._import_checkpoint).grid(row=0, column=2,
+                                                         padx=(6, 0))
         self.vram_note = StringVar(
             value="Sizes shown per model — your video card RAM must be above "
                   "that number (keep ~2 GB headroom).")
@@ -2814,6 +2817,98 @@ class App:
         self.ragmap_path = None
         self.ragmap_var.set("none")
         self._schedule_persist()
+
+    def _import_checkpoint(self):
+        """Browse for a base model (.safetensors) anywhere on disk and make
+        it available here — for a model you trained or downloaded yourself.
+
+        On the same drive it is hard-linked in, which is instant and costs
+        no extra space; across drives the engine cannot reach it where it
+        lies, so it is copied (with the size shown first, since base models
+        run to several GB)."""
+        path = filedialog.askopenfilename(
+            title="Add a base model",
+            filetypes=[("Model (safetensors)", "*.safetensors"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        src = Path(path)
+        if src.suffix.lower() != ".safetensors":
+            # .ckpt/.pt are pickles: loading one can execute code
+            messagebox.showerror(
+                "Add a base model",
+                f"{src.name} isn't a .safetensors file.\n\nOnly safetensors "
+                "models are accepted — .ckpt and .pt can run code when they "
+                "are loaded.")
+            return
+        dest_dir = MODELS / "checkpoints"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        if dest.exists():
+            if dest.resolve() == src.resolve():
+                self._refresh_models()
+                self._select_model(src.name)
+                self.status_var.set(f"{src.name} is already in your model "
+                                    "folder — selected.")
+                return
+            if not messagebox.askyesno(
+                    "Replace model",
+                    f"{src.name} is already in your model folder.\n\n"
+                    "Replace it?"):
+                return
+            try:
+                dest.unlink()
+            except OSError as e:
+                messagebox.showerror("Add a base model",
+                                     f"Could not replace it: {e}")
+                return
+        try:
+            os.link(src, dest)       # same volume: instant, no extra space
+        except OSError:
+            gb = src.stat().st_size / (1024 ** 3)
+            if not messagebox.askyesno(
+                    "Copy model",
+                    f"{src.name} is on a different drive, so it has to be "
+                    f"copied into your model folder.\n\nThat's {gb:.1f} GB. "
+                    "Copy it now?"):
+                return
+            threading.Thread(target=self._copy_checkpoint,
+                             args=(src, dest), daemon=True).start()
+            return
+        self._refresh_models()
+        self._select_model(src.name)
+        self.status_var.set(f"Added {src.name} — selected and ready.")
+
+    def _copy_checkpoint(self, src, dest):
+        """Copy a multi-GB model off the UI thread, reporting progress."""
+        tmp = dest.with_suffix(".part")
+        try:
+            total = src.stat().st_size
+            done = 0
+            with open(src, "rb") as fin, open(tmp, "wb") as fout:
+                while True:
+                    chunk = fin.read(8 << 20)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+                    done += len(chunk)
+                    self.ui_queue.put(("progress", done, total))
+            tmp.replace(dest)
+            self.ui_queue.put(("progress", 0, 1))
+            self.ui_queue.put(("model_added", dest.name))
+        except Exception as e:
+            tmp.unlink(missing_ok=True)
+            self.ui_queue.put(("progress", 0, 1))
+            self.ui_queue.put(("error", f"Could not copy the model: {e}"))
+
+    def _select_model(self, raw):
+        """Point the dropdown at a checkpoint by its filename."""
+        for disp, name in self._model_display.items():
+            if name == raw:
+                self.model_var.set(disp)
+                self._on_model_pick()
+                return True
+        return False
 
     def _import_lora(self):
         """Browse for .safetensors LoRA file(s), copy them into
@@ -3865,6 +3960,11 @@ class App:
                         f"GPU {used:,} / {total:,} MB")
                 elif kind == "models_changed":
                     self._refresh_models()
+                elif kind == "model_added":
+                    self._refresh_models()
+                    self._select_model(msg[1])
+                    self.status_var.set(f"Added {msg[1]} — selected and "
+                                        "ready.")
                 elif kind == "ollama":
                     self._on_ollama_found(msg[1])
                 elif kind == "enhanced":

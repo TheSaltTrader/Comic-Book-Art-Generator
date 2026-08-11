@@ -1,5 +1,19 @@
 # Changelog — Comic Book Art Creator
 
+## v1.14.0 — 2026-08-11
+- **Add your own base model.** A new "📁 Add model…" button beside the
+  model dropdown browses to any `.safetensors` on your disk — one you
+  trained yourself, or downloaded from anywhere — and makes it available
+  straight away, selected and ready to generate with. No restart needed,
+  even if the engine is already running.
+  - On the same drive the model is linked in rather than copied, so it
+    takes no extra space at all. If it lives on another drive it has to
+    be copied, and you're told the size before that starts; the copy runs
+    in the background with the progress bar.
+  - `.ckpt` and `.pt` files are refused with an explanation. They are
+    pickle files and can run code when loaded, which is why this app only
+    ever accepts safetensors.
+
 ## v1.13.1 — 2026-08-10
 - **Closing the app now frees your graphics card.** The engine is a
   separate program that keeps the last model it used loaded — 7 GB after
