@@ -1,5 +1,16 @@
 # Changelog — Comic Book Art Creator
 
+## v1.16.1 — 2026-08-11
+- **Fix: private (embeds) RAG maps now actually generate.** The embed path
+  passed the basic IP-Adapter node's `weight_type: "standard"`, but the
+  `IPAdapterEmbeds` node is an advanced node whose weight list has no
+  "standard" — so the engine rejected the graph (HTTP 400) and no picture was
+  made. Now uses "linear" (the advanced-node equivalent). Caught by a live
+  end-to-end test in the real engine: with the fix, an embeds map renders an
+  image essentially identical to feeding the reference images directly (mean
+  pixel difference under 2 on 0–255), confirming the precomputed embeds
+  condition IP-Adapter the same way the images would.
+
 ## v1.16.0 — 2026-08-11
 - **Private RAG references.** A retrieval map made in Laura-Trainer with the
   new "Private references" option carries no viewable pictures — instead it

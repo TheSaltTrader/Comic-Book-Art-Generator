@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.16.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1264,8 +1264,13 @@ def build_graph(p):
                    "inputs": {"model": ["50", 0], "ipadapter": ["50", 1],
                               "pos_embed": ["58", 0],
                               "weight": p.get("style_weight", 0.8),
-                              "weight_type": p.get("ref_weight_type",
-                                                   "standard"),
+                              # IPAdapterEmbeds is an ADVANCED node: its
+                              # weight_type is WEIGHT_TYPES (linear, ease…,
+                              # style transfer) and has NO "standard" (that is
+                              # only on the basic IPAdapter node the image path
+                              # uses). "linear" is the advanced-node equivalent
+                              # of standard uniform weighting.
+                              "weight_type": "linear",
                               "start_at": 0.0, "end_at": 1.0,
                               "embeds_scaling": "V only"}}
         model_ref = ["59", 0]

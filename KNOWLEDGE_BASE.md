@@ -217,6 +217,16 @@ gated and not used.
   `clip_vision` or a `neg_embed`; the UnifiedLoader bundles clip_vision, so
   passing only `pos_embed` is valid. The two paths are mutually exclusive
   and selected by `ragmap["_embeds_only"]`.
+  **GOTCHA (v1.16.1, caught only by a live engine run):** `IPAdapterEmbeds`
+  is an ADVANCED node — its `weight_type` list is `WEIGHT_TYPES` (`linear`,
+  `ease in/out`, `style transfer`, …) and does NOT contain `"standard"`, which
+  is only valid on the basic `IPAdapter` node the image path uses. Passing
+  `"standard"` makes the engine reject the whole graph with HTTP 400
+  `value_not_in_list` and no picture is produced — use `"linear"` (the
+  advanced-node equivalent of standard uniform weighting). Static/offline
+  checks pass this; only a real POST to a running engine catches the enum
+  mismatch, so validate any new node-input value against a live engine, not
+  just the node's Python source.
 
 ---
 
