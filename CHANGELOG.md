@@ -1,5 +1,20 @@
 # Changelog — Comic Book Art Creator
 
+## v1.16.0 — 2026-08-11
+- **Private RAG references.** A retrieval map made in Laura-Trainer with the
+  new "Private references" option carries no viewable pictures — instead it
+  ships each reference as a precomputed IP-Adapter embed. The app now reads
+  those maps and feeds the embeds through the same "PLUS" IP-Adapter it uses
+  for image references, so a map can guide your pictures without ever handing
+  over openable copies of the training images. Ordinary image maps work
+  exactly as before; the app picks the right path automatically. If a map has
+  no usable references at all, it still falls back to using the captions as
+  prompt text.
+- Under the hood: retrieval, near-duplicate skipping, the paired-LoRA
+  auto-apply and the trigger word behave identically for both kinds of map;
+  only the final guidance step differs (stock `IPAdapterLoadEmbeds` →
+  `IPAdapterCombineEmbeds` → `IPAdapterEmbeds` nodes for the embed path).
+
 ## v1.15.0 — 2026-08-11
 - **Your setup is remembered properly.** Ticking a LoRA is now saved the
   moment you do it, so the LoRAs you work with are still ticked next

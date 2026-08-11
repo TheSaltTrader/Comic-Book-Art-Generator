@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1237,6 +1237,39 @@ def build_graph(p):
                                                    "standard")}}
         model_ref = ["51", 0]
 
+    # embeddings-only RAG map: the references arrive as precomputed IP-Adapter
+    # "PLUS" embeds (.ipadpt = CLIP penultimate hidden states) rather than
+    # images, so there is nothing to LoadImage/encode — load each embed and
+    # combine them, then apply with IPAdapterEmbeds. Same PLUS adapter the
+    # image path uses, so the guidance is equivalent; the pictures just never
+    # existed as files here.
+    elif p.get("style_embed_names"):
+        names = p["style_embed_names"][:5]   # IPAdapterCombineEmbeds takes ≤5
+        g["50"] = {"class_type": "IPAdapterUnifiedLoader",
+                   "inputs": {"preset": "PLUS (high strength)",
+                              "model": model_ref}}
+        load_ids = []
+        lid = 52
+        for nm in names:
+            g[str(lid)] = {"class_type": "IPAdapterLoadEmbeds",
+                           "inputs": {"embeds": nm}}
+            load_ids.append(str(lid))
+            lid += 1
+        combine_inputs = {"method": "concat"}
+        for idx, s in enumerate(load_ids, start=1):
+            combine_inputs[f"embed{idx}"] = [s, 0]
+        g["58"] = {"class_type": "IPAdapterCombineEmbeds",
+                   "inputs": combine_inputs}
+        g["59"] = {"class_type": "IPAdapterEmbeds",
+                   "inputs": {"model": ["50", 0], "ipadapter": ["50", 1],
+                              "pos_embed": ["58", 0],
+                              "weight": p.get("style_weight", 0.8),
+                              "weight_type": p.get("ref_weight_type",
+                                                   "standard"),
+                              "start_at": 0.0, "end_at": 1.0,
+                              "embeds_scaling": "V only"}}
+        model_ref = ["59", 0]
+
     denoise = 1.0
     latent_ref = ["5", 0]
     if p.get("border_assets"):
@@ -1564,14 +1597,47 @@ def load_ragmap(path):
     if not img_dir.is_dir():
         img_dir = base / "images" if (base / "images").is_dir() else base
     data["image_dir"] = str(img_dir)
+
+    # embeddings-only maps ship precomputed IP-Adapter embeds (.ipadpt) in
+    # place of viewable images: the references still guide generation, but the
+    # source pictures never travel as files anyone can open. Resolve those
+    # beside the map the same way images are.
+    emb_rel = data.get("embeds_dir") or ""
+    embeds_dir = (base / emb_rel) if emb_rel else base
+    if not embeds_dir.is_dir():
+        embeds_dir = base / "embeds" if (base / "embeds").is_dir() else base
+    data["embeds_dir"] = str(embeds_dir)
+
+    has_embed = False
+    has_image = False
     for e in data.get("entries", []):
-        ip = Path(e.get("image", ""))
-        p = ip if ip.is_absolute() else (img_dir / ip)
-        if not p.exists() and (base / ip.name).exists():
-            p = base / ip.name          # images sitting beside the map
-        e["_path"] = str(p)
+        img_name = e.get("image", "")
+        if img_name:
+            ip = Path(img_name)
+            p = ip if ip.is_absolute() else (img_dir / ip)
+            if not p.exists() and (base / ip.name).exists():
+                p = base / ip.name          # images sitting beside the map
+            # only a real file counts as an image; a bare folder must not read
+            # as "has image" or retrieval would try to feed a directory
+            e["_path"] = str(p) if p.is_file() else ""
+        else:
+            e["_path"] = ""
+        emb_name = e.get("embed", "")
+        if emb_name:
+            ep = Path(emb_name)
+            ep = ep if ep.is_absolute() else (embeds_dir / ep)
+            if not ep.exists() and (base / Path(emb_name).name).exists():
+                ep = base / Path(emb_name).name
+            e["_ipadpt"] = str(ep) if ep.is_file() else ""
+        else:
+            e["_ipadpt"] = ""
+        has_embed = has_embed or bool(e["_ipadpt"])
+        has_image = has_image or bool(e["_path"])
         if not e.get("keywords"):
             e["keywords"] = _caption_keywords(e.get("caption", ""))
+    # embeddings-only: the builder said so, or there are embeds and no images
+    data["_embeds_only"] = (str(data.get("mode", "")).lower() == "embeddings-only"
+                            or (has_embed and not has_image))
 
     if not data.get("name"):
         stem = base.name if mp.name.lower() == "index.json" \
@@ -1626,15 +1692,17 @@ def ragmap_retrieve(ragmap, prompt, k=None, require_image=True):
     matches, so the LoRA always gets representative guidance). When the
     map ships CLIP embeddings, an entry that is a near-duplicate of one
     already picked is skipped, so the k references actually differ.
-    require_image=False also considers entries whose image is missing —
-    those can still be used as caption text."""
+    require_image=False also considers entries whose reference is missing —
+    those can still be used as caption text. A "reference" is either a real
+    image file (_path) or a precomputed IP-Adapter embed (_ipadpt), so
+    embeddings-only maps retrieve exactly like image maps."""
     if not ragmap:
         return []
     k = k or int(ragmap.get("top_k") or 4)
     words = set(re.findall(r"[a-z0-9]+", (prompt or "").lower()))
     scored = []
     for i, e in enumerate(ragmap.get("entries", [])):
-        if require_image and not Path(e.get("_path", "")).exists():
+        if require_image and not (e.get("_path") or e.get("_ipadpt")):
             continue
         text = " ".join(e.get("keywords", [])) + " " + e.get("caption", "")
         ewords = set(re.findall(r"[a-z0-9]+", text.lower()))
@@ -1809,6 +1877,27 @@ class Generator:
                     pass
             if names:
                 params["style_ref_names"] = names
+        # embeddings-only RAG map: copy the retrieved .ipadpt embeds into the
+        # engine's input folder so IPAdapterLoadEmbeds can read them by name
+        # (no /upload/image endpoint for non-images, and the app has no torch
+        # to build them — they arrive ready-made from the map).
+        if params.get("rag_embed_paths"):
+            enames = []
+            dest_dir = ENGINE_DIR / "input"
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            for rp in params["rag_embed_paths"]:
+                try:
+                    src = Path(rp)
+                    if src.exists():
+                        shutil.copyfile(src, dest_dir / src.name)
+                        enames.append(src.name)
+                except Exception:
+                    pass
+            if enames:
+                params["style_embed_names"] = enames
         # prompt-only borders now generate the FULL frame (no restrictive
         # edge-band mask): the model/LoRA draws a complete ornate frame
         # with a plain center, and cut_center carves the center transparent
@@ -3876,6 +3965,7 @@ class App:
         # paired LoRA + trigger. Falls back to caption text if IP-Adapter
         # isn't installed. Only in plain generation (not editing).
         rag_refs = []
+        rag_embed_paths = []
         rag_weight = 0.8
         if self.ragmap and not editing:
             if model_family(model) in ("flux", "schnell"):
@@ -3891,10 +3981,18 @@ class App:
                 trg = self.ragmap.get("trigger", "")
                 if trg and trg.lower() not in full_prompt.lower():
                     full_prompt = f"{trg}, {full_prompt}"
+                used_refs = False
                 if hits and self._style_support_ok():
-                    rag_refs = [h["_path"] for h in hits]
-                else:
-                    # no IP-Adapter, or the images didn't travel with the
+                    if self.ragmap.get("_embeds_only"):
+                        # precomputed IP-Adapter embeds, no viewable images
+                        rag_embed_paths = [h["_ipadpt"] for h in hits
+                                           if h.get("_ipadpt")]
+                        used_refs = bool(rag_embed_paths)
+                    else:
+                        rag_refs = [h["_path"] for h in hits if h.get("_path")]
+                        used_refs = bool(rag_refs)
+                if not used_refs:
+                    # no IP-Adapter, or the references didn't travel with the
                     # map — use what is there, which is the captions
                     text_hits = hits or ragmap_retrieve(
                         self.ragmap, prompt, require_image=False)
@@ -3904,7 +4002,7 @@ class App:
                         full_prompt = f"{full_prompt}, {caps}"
                     self.status_var.set(
                         "RAG map applied as text "
-                        + ("(this map carries no images)." if not hits else
+                        + ("(this map carries no references)." if not hits else
                            "(install IP-Adapter via 🧭 RAG map… for image "
                            "guidance)."))
 
@@ -3927,7 +4025,8 @@ class App:
                       upscale=self.upscale_var.get(),
                       preset=self.preset_var.get(),
                       ref_images=list(self.ref_paths),
-                      rag_ref_paths=rag_refs, style_weight=rag_weight,
+                      rag_ref_paths=rag_refs, rag_embed_paths=rag_embed_paths,
+                      style_weight=rag_weight,
                       editor=editor,
                       out_size=(w, h) if editing
                       and self.editor_canvas_var.get() else None,

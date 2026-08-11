@@ -197,6 +197,27 @@ Editors:
 `IPAdapterUnifiedLoader` preset "PLUS (high strength)". Flux Redux is
 gated and not used.
 
+**Two ways references reach IP-Adapter (v1.16.0):**
+
+- *Images* (default RAG map): retrieved image files are uploaded to the
+  engine's `input/` via `/upload/image`, then `LoadImage` → `ImageBatch`
+  → `IPAdapter` (node `51`), which runs clip_vision internally.
+- *Precomputed embeds* (embeddings-only map): the map ships no viewable
+  pictures — each entry is a `.ipadpt` file (a `torch.save`d tensor = the
+  CLIP vision **penultimate hidden states**, `[1,257,1280]` fp16, the
+  exact "PLUS" image embed IP-Adapter conditions on). The app copies the
+  retrieved `.ipadpt` files into the engine's `input/` (a plain file copy
+  — the main process has no torch to build them; they arrive ready-made
+  from Laura-Trainer's builder, which does) and the graph wires the STOCK
+  nodes `IPAdapterUnifiedLoader` (PLUS) → one `IPAdapterLoadEmbeds`
+  (`torch.load`) per file → `IPAdapterCombineEmbeds` (`concat`, ≤5) →
+  `IPAdapterEmbeds` (nodes `50`/`52…`/`58`/`59`). Same PLUS adapter as the
+  image path, so the guidance is equivalent — the source pictures simply
+  never existed as files here. `IPAdapterEmbeds` needs either a
+  `clip_vision` or a `neg_embed`; the UnifiedLoader bundles clip_vision, so
+  passing only `pos_embed` is valid. The two paths are mutually exclusive
+  and selected by `ragmap["_embeds_only"]`.
+
 ---
 
 ## 5. Subsystems
@@ -237,9 +258,29 @@ pixels and makes the outline worse. Erode 1px, feather 0.5, alpha floor
 
 **RAG maps** — see `RAGMAP.md`. Retrieval is literal word overlap
 against keywords + caption, so keywords must use the words a person
-would actually type. Optional CLIP embeddings are used only to drop
-near-duplicate references (cosine > 0.97). Every field is optional
-except `entries`, and each missing piece costs only its own feature.
+would actually type. Optional CLIP embeddings (`embeddings.safetensors`,
+pooled + L2-normalised) are used only to drop near-duplicate references
+(cosine > 0.97) — NOT for conditioning. Every field is optional except
+`entries`, and each missing piece costs only its own feature.
+
+`load_ragmap` reads two conditioning layouts, distinguished by
+`_embeds_only`:
+
+- *with-images*: entries carry `image`; `_path` resolves to a real file
+  (a bare folder must NOT count — check `is_file()`, or retrieval tries to
+  feed a directory).
+- *embeddings-only* (`mode: "embeddings-only"`, or embeds present and no
+  images): entries carry `embed` (a `.ipadpt` under `embeds_dir`), resolved
+  to `_ipadpt`; `_path` stays empty. `ragmap_retrieve` treats an entry as a
+  usable reference when it has EITHER `_path` OR `_ipadpt`, so retrieval,
+  dedup, LoRA auto-apply and trigger injection are identical for both
+  layouts. Generation then branches on `_embeds_only` (see §4). The dedup
+  `embeddings.safetensors` still ships in embeddings-only maps, so
+  near-duplicate skipping keeps working.
+
+This is the privacy path: it lets a map guide generation from real
+training references without ever shipping an openable copy of those
+images. It pairs with Laura-Trainer's "Private references" build option.
 
 **Prompt enhancer** — optional local Ollama. It must degrade to nothing
 when Ollama is absent: `ollama_models()` returns `[]` on any failure and
