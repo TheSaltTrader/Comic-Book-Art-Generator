@@ -39,7 +39,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.16.1"
+APP_VERSION = "1.17.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2374,6 +2374,8 @@ class App:
                    command=self._import_lora).pack(side="left")
         ttk.Button(limprow, text="↻", width=3,
                    command=self._refresh_models).pack(side="left", padx=(4, 0))
+        ttk.Button(limprow, text="🗑 Remove", command=self._remove_lora,
+                   style="Danger.TButton").pack(side="left", padx=(4, 0))
         ttk.Button(limprow, text="📁 LoRA folder",
                    command=lambda: os.startfile(
                        str(_ensure_lora_dir()))).pack(side="left", padx=(4, 0))
@@ -2399,7 +2401,7 @@ class App:
         self.ragmap_var = StringVar(value="none")
         ttk.Label(ragrow, textvariable=self.ragmap_var, style="Dim.TLabel",
                   wraplength=230).grid(row=0, column=1, sticky=W, padx=6)
-        ttk.Button(ragrow, text="✕", width=3,
+        ttk.Button(ragrow, text="🗑 Remove", width=10,
                    command=self._clear_ragmap).grid(row=0, column=2)
 
         # size + settings
@@ -2883,9 +2885,7 @@ class App:
         if not n:
             notes.append(f"no images travelled with this map — its {caps} "
                          "captions will be used as text instead")
-        self.ragmap_var.set(
-            f"{rag.get('name', Path(path).stem)} — {n} imgs"
-            + (f" · LoRA {lora}" if lora else ""))
+        self.ragmap_var.set(self._ragmap_label(rag, path))
         if n and not self._style_support_ok():
             if messagebox.askyesno(
                     "Enable image guidance",
@@ -2962,11 +2962,59 @@ class App:
         self.status_var.set("Prompt restored.")
         self._schedule_persist()
 
-    def _clear_ragmap(self):
+    def _clear_ragmap(self, note=""):
+        """Take the RAG map out of use and forget it, so it does not come
+        back on the next launch. The map file itself is left alone."""
+        had = self.ragmap_path
         self.ragmap = None
         self.ragmap_path = None
         self.ragmap_var.set("none")
+        if note:
+            self.status_var.set(note)
+        elif had:
+            self.status_var.set(f"RAG map removed — {Path(had).name} is no "
+                                "longer guiding generations.")
         self._schedule_persist()
+
+    def _ragmap_label(self, rag, path):
+        """Name + how many references are actually usable right now."""
+        entries = rag.get("entries", [])
+        live = sum(1 for e in entries
+                   if e.get("_path") or e.get("_ipadpt"))
+        missing = len(entries) - live
+        kind = "private refs" if rag.get("_embeds_only") else "imgs"
+        txt = f"{rag.get('name', Path(path).stem)} — {live} {kind}"
+        if missing:
+            txt += f" ({missing} missing)"
+        lora = ragmap_lora(rag)
+        return txt + (f" · LoRA {lora}" if lora else "")
+
+    def _validate_ragmap(self):
+        """Drop a RAG map that is no longer where it was: the file may have
+        been moved or deleted since it was loaded. References that vanished
+        individually are counted in the label rather than dropping the whole
+        map, since the rest of it still works."""
+        if not self.ragmap_path:
+            return
+        if not Path(self.ragmap_path).exists():
+            name = Path(self.ragmap_path).name
+            self._clear_ragmap(f"RAG map removed — {name} is no longer at "
+                               "its saved location.")
+            return
+        try:
+            fresh = load_ragmap(self.ragmap_path)   # re-resolve every file
+        except Exception as e:
+            self._clear_ragmap(f"RAG map removed — it could not be read "
+                               f"any more ({e}).")
+            return
+        entries = fresh.get("entries", [])
+        if not any(e.get("_path") or e.get("_ipadpt") or e.get("caption")
+                   for e in entries):
+            self._clear_ragmap("RAG map removed — none of its references "
+                               "are on disk any more.")
+            return
+        self.ragmap = fresh
+        self.ragmap_var.set(self._ragmap_label(fresh, self.ragmap_path))
 
     def _import_checkpoint(self):
         """Browse for a base model (.safetensors) anywhere on disk and make
@@ -3059,6 +3107,53 @@ class App:
                 self._on_model_pick()
                 return True
         return False
+
+    def _remove_lora(self):
+        """Take the ticked LoRA(s) out of the list by deleting the files
+        from the LoRA folder — the list is a view of that folder, so there
+        is nothing else to remove. Always asks first, and says plainly
+        that a file is being deleted."""
+        names = self._selected_loras()
+        if not names:
+            self.status_var.set("Tick the LoRA(s) you want to remove first.")
+            return
+        warn = ""
+        if BORDER_LORA_FILE in names:
+            warn = (f"\n\n{BORDER_LORA_FILE} is the frame LoRA the Border "
+                    "maker uses. Removing it makes borders plainer until "
+                    "the next update check downloads it again.")
+        if not messagebox.askyesno(
+                "Remove LoRA",
+                "Delete these from your LoRA folder?\n\n  "
+                + "\n  ".join(names)
+                + "\n\nThe file(s) will be gone from disk. You can add them "
+                  "back later with ➕ Add LoRA file…" + warn):
+            return
+        gone, failed = [], []
+        lora_dir = _ensure_lora_dir()
+        for name in names:
+            p = lora_dir / name
+            try:
+                if p.exists():
+                    p.unlink()
+                    gone.append(name)
+                else:
+                    gone.append(name)      # already absent: nothing to do
+            except OSError as e:
+                # the engine may still hold a LoRA it loaded this session
+                failed.append(f"{name} ({e.strerror or e})")
+        self._pending_loras = {n for n in getattr(self, "_pending_loras",
+                                                  set()) if n not in gone}
+        self._refresh_models()
+        parts = []
+        if gone:
+            parts.append(f"Removed {len(gone)}: " + ", ".join(gone))
+        if failed:
+            parts.append("Could not remove: " + "; ".join(failed)
+                         + " — it may be in use by the engine; try again "
+                           "after the next generation finishes.")
+        self.status_var.set("  ·  ".join(parts))
+        self._schedule_persist()
 
     def _import_lora(self):
         """Browse for .safetensors LoRA file(s), copy them into
@@ -3237,8 +3332,8 @@ class App:
                 try:
                     self.ragmap = load_ragmap(rmp)
                     self.ragmap_path = rmp
-                    nm = self.ragmap.get("name", Path(rmp).stem)
-                    self.ragmap_var.set(f"{nm} (loaded)")
+                    self.ragmap_var.set(
+                        self._ragmap_label(self.ragmap, rmp))
                 except Exception:
                     self.ragmap = None
             self.seed_var.set(st.get("seed", "0"))
@@ -3728,12 +3823,23 @@ class App:
         loras = _visible_loras(list_loras())
         keep = set(self._selected_loras()) | getattr(self, "_pending_loras",
                                                      set())
+        # a LoRA that has been deleted or moved since it was ticked must
+        # not linger in the saved selection, or it would be sent to the
+        # engine on the next generation and fail the whole job
+        ghosts = keep - set(loras)
+        keep -= ghosts
         self._pending_loras = set()
         self.lora_list.delete(0, END)
         for idx, name in enumerate(loras):
             self.lora_list.insert(END, name)
             if name in keep:
                 self.lora_list.selection_set(idx)
+        if ghosts:
+            self.status_var.set(
+                f"Dropped {len(ghosts)} LoRA(s) no longer in the folder: "
+                + ", ".join(sorted(ghosts)))
+            self._schedule_persist()
+        self._validate_ragmap()
 
     def _pick_ref(self):
         paths = filedialog.askopenfilenames(filetypes=[

@@ -1,5 +1,22 @@
 # Changelog — Comic Book Art Creator
 
+## v1.17.0 — 2026-08-11
+- **Remove a LoRA from the list.** A new "🗑 Remove" button next to
+  ➕ Add LoRA file… deletes the ticked LoRA(s) from your LoRA folder — the
+  list is a view of that folder, so that is what removing means. It asks
+  first and says plainly that files are being deleted, warns if you are
+  removing the frame LoRA the Border maker uses, and tells you if one
+  could not be deleted because the engine still has it open.
+- **Remove a RAG map.** The cryptic ✕ beside the RAG map is now a labelled
+  "🗑 Remove" that takes the map out of use and forgets it, so it does not
+  come back next launch. The map file on disk is left alone.
+- **Missing files no longer linger.** LoRAs and RAG maps are re-checked
+  whenever the lists refresh. A LoRA deleted or moved outside the app is
+  dropped from your ticked selection instead of being sent to the engine
+  and failing the job; a RAG map whose file has gone is unloaded with a
+  note. If only some of a map's references are missing, the map keeps
+  working and the label says how many are gone — "12 imgs (3 missing)".
+
 ## v1.16.1 — 2026-08-11
 - **Fix: private (embeds) RAG maps now actually generate.** The embed path
   passed the basic IP-Adapter node's `weight_type: "standard"`, but the
