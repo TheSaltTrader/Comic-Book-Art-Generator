@@ -173,3 +173,13 @@ Comic_book__art_creator\
 ├── releases\vX.Y.Z\                      versioned releases for GitHub
 └── SECURITY.md                           OWASP security review
 ```
+
+## Documentation
+
+| File | What's in it |
+|---|---|
+| `KNOWLEDGE_BASE.md` | How the app is put together, the engine's lifecycle, build and release steps, the gotchas behind each subsystem, and the dead ends not worth retrying. Read this first if you're changing the code. |
+| `RAGMAP.md` | The `.ragmap.json` contract — what a trainer should emit so its maps load here. |
+| `TRAINING.md` | Building a captioned dataset from your own generations. |
+| `SECURITY.md` | OWASP-mapped security review. |
+| `CHANGELOG.md` | What changed in each version. |
