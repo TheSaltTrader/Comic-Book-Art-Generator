@@ -372,6 +372,20 @@ differently-seeded attempts on the same target — both via the ordinary
 client-side batch loop, and the direct path now follows the main seed
 rules (Random / fixed). The button wears `Swap.TButton` — Danger red,
 one font size up — so the swap action reads at a glance.
+**v1.23.0 — adherence + size:** user runs showed the chained swap can
+still return the base merely restyled (identity transfer varies by
+inputs/seed), so swaps run at `SWAP_GUIDANCE` 3.0 via the graph's new
+`guidance` param (default stays 2.5 for ordinary edits) with a prompt
+that names the identity channels to copy (facial structure, eyes, skin
+tone, hair, beard). Size plumbing fixed in the same pass:
+`_swap_face_pass` takes `out_size` = the CANVAS dims from `_run` (a
+4x-upscaled base is LANCZOS-downsized before upload so the swap lands at
+canvas size, not 4x), and the direct swap passes `out_size=(iw, ih)`
+unconditionally — without it Kontext snaps to its own ~1MP dims when
+"Output at Canvas size" is unticked. Remaining known limit: Kontext-dev
+is a single-image editor at heart; if adherence stays weak on real
+inputs, the next lever is routing swaps through Qwen Image Edit
+(natively multi-image, `image1-3`).
 
 **LoRA trigger auto-injection** (v1.21.0; `lora_trigger`,
 `_safetensors_metadata`) — each ticked LoRA's activation keyword(s) are

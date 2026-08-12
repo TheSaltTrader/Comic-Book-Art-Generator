@@ -1,5 +1,20 @@
 # Changelog — Comic Book Art Creator
 
+## v1.23.0 — 2026-08-12
+- **Stronger face transfer.** The swap instruction now explicitly demands
+  the head and face be replaced with the second image's person — facial
+  structure, eyes, skin tone, hair, beard — and the swap runs at higher
+  guidance (3.0) so Kontext follows the instruction instead of just
+  restyling the base picture. If a swap still comes back with the original
+  face, try Variations 3–5 and keep the best — identity transfer varies
+  by seed.
+- **Canvas size is respected everywhere in a swap.** The swapped picture
+  now always lands at your Canvas size in gen-then-swap (previously a
+  4x-upscaled base dragged the swap to 4x size), and a direct swap always
+  keeps the selected picture's exact size (previously Kontext snapped to
+  its own ~1-megapixel dimensions unless "Output at Canvas size" was
+  ticked).
+
 ## v1.22.0 — 2026-08-12
 - **Face swap actually swaps now.** The Kontext swap was sending the two
   pictures stitched side-by-side, and the model redrew them side-by-side

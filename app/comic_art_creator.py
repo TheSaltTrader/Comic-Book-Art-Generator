@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.22.0"
+APP_VERSION = "1.23.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -694,7 +694,8 @@ def build_kontext_graph(p):
             nid += 1
             sid += 3
         g["33"] = {"class_type": "FluxGuidance",
-                   "inputs": {"conditioning": cond, "guidance": 2.5}}
+                   "inputs": {"conditioning": cond,
+                              "guidance": p.get("guidance") or 2.5}}
         latent_ref = first_lat
     else:
         img_ref, nid, sid = None, 10, 20
@@ -721,7 +722,8 @@ def build_kontext_graph(p):
         g["32"] = {"class_type": "ReferenceLatent",
                    "inputs": {"conditioning": ["4", 0], "latent": ["31", 0]}}
         g["33"] = {"class_type": "FluxGuidance",
-                   "inputs": {"conditioning": ["32", 0], "guidance": 2.5}}
+                   "inputs": {"conditioning": ["32", 0],
+                              "guidance": p.get("guidance") or 2.5}}
         latent_ref = ["31", 0]
     g["34"] = {"class_type": "ConditioningZeroOut",
                "inputs": {"conditioning": ["4", 0]}}
@@ -1423,11 +1425,17 @@ BORDER_CLEAN_PROMPT = (
 # person's photo. Kontext keeps the scene and restyles the face to match, so a
 # LoRA/RAG-built body becomes that specific person without touching the art.
 SWAP_PERSON_PROMPT = (
-    "Replace the person in the first image with the person shown in the "
-    "second image. Keep the first image's exact pose, body, clothing, "
-    "framing, background, lighting, colors and art style — change only the "
-    "face and identity so it clearly becomes the person from the second "
-    "image. Match that art style; do not make the face photographic.")
+    "Replace the head and face of the person in the first image with the "
+    "head and face of the person from the second image, so the character "
+    "is unmistakably that person: copy their facial structure, eyes, nose, "
+    "mouth, skin tone, hair color and hairstyle, and any beard, freckles "
+    "or marks. Keep everything else from the first image exactly as it "
+    "is — pose, body, clothing, framing, background, lighting, colors and "
+    "art style. Render the new face in the first image's art style, not "
+    "as a photograph.")
+# swaps follow the instruction better with guidance above the editing
+# default 2.5; too high drifts the style
+SWAP_GUIDANCE = 3.0
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -2079,9 +2087,10 @@ class Generator:
                     # gen-then-swap: after the RAG/LoRA base, put the face in
                     # with Flux Kontext and keep BOTH pictures
                     if params.get("swap_face") and not CANCEL.is_set():
-                        swapped = self._swap_face_pass(ws, img,
-                                                       params["swap_face"],
-                                                       seed=p["seed"])
+                        # swap at CANVAS size — the base may be 4x-upscaled
+                        swapped = self._swap_face_pass(
+                            ws, img, params["swap_face"], seed=p["seed"],
+                            out_size=(p["width"], p["height"]))
                         if swapped is not None:
                             sp = dict(p)
                             sp.pop("swap_face", None)
@@ -2093,24 +2102,29 @@ class Generator:
         finally:
             ws.close()
 
-    def _swap_face_pass(self, ws, base_img, face_path, seed=0):
+    def _swap_face_pass(self, ws, base_img, face_path, seed=0, out_size=None):
         """Second pass of a gen-then-swap: put a face into the freshly drawn
         base image with Flux Kontext. Chained references (ref_mode) — a
         stitched pair just gets redrawn side-by-side instead of swapped.
-        Returns the swapped image, or None on any failure (the base image
-        is always kept regardless)."""
+        out_size = the canvas size; a 4x-upscaled base is brought back down
+        so the swap always lands at canvas dimensions. Returns the swapped
+        image, or None on any failure (the base image is always kept
+        regardless)."""
         if CANCEL.is_set():
             return None
         try:
             self.q.put(("status", "Swapping the face in (Flux Kontext)…"))
-            base_name = self._upload_pil(base_img.convert("RGB"),
-                                         "cbac_swap_base.png")
+            size = tuple(out_size) if out_size \
+                else (base_img.width, base_img.height)
+            up = base_img.convert("RGB")
+            if (up.width, up.height) != size:
+                up = up.resize(size, Image.LANCZOS)
+            base_name = self._upload_pil(up, "cbac_swap_base.png")
             face_name = self._upload_ref(face_path)
             cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
                       edit_image_names=[base_name, face_name],
-                      ref_mode="chain",
-                      out_size=(base_img.width, base_img.height),
-                      seed=seed, steps=None)
+                      ref_mode="chain", guidance=SWAP_GUIDANCE,
+                      out_size=size, seed=seed, steps=None)
             graph = build_kontext_graph(cp)
             r = requests.post(f"{ENGINE_URL}/prompt",
                               json={"prompt": graph,
@@ -5055,9 +5069,12 @@ class App:
                 transparent=False, upscale=False,
                 preset=self.preset_var.get(),
                 ref_images=[target_path, face], ref_mode="chain",
+                guidance=SWAP_GUIDANCE,
                 rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
                 editor="kontext",
-                out_size=(iw, ih) if self.editor_canvas_var.get() else None,
+                # a swap always keeps the target picture's exact size —
+                # without this Kontext snaps to its own ~1MP dimensions
+                out_size=(iw, ih),
                 denoise=1.0)
             self.status_var.set(f"Swapping {label} into the selected picture "
                                 "with Flux Kontext…")
