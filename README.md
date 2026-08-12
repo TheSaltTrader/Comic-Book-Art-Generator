@@ -1,6 +1,6 @@
 # Comic Book Art Creator
 
-**v1.1.0** — a fully local, unrestricted comic-book art studio for your GPU.
+**v1.21.0** — a fully local, unrestricted comic-book art studio for your GPU.
 Nothing leaves your machine — no accounts, no filters, no cloud.
 Compatible with 64-bit **Windows 10 and 11** — **no Python, git, or any
 other software required**; everything the app needs lives in its own
@@ -87,6 +87,16 @@ page URL (free API key from civitai.com → Account Settings → API Keys;
 stored encrypted). Or drop `.safetensors` files into `models\loras` and
 hit **↻**.
 
+**Trigger words are handled for you**: when you tick a LoRA, its
+activation keyword(s) are read from the LoRA's own metadata (or the
+sidecar file the CivitAI downloader saves) and added to the prompt
+automatically — no need to remember or type them, and nothing is doubled
+if you already wrote them yourself.
+
+Two **status badges** top-right (next to the VRAM meter) show at a glance
+whether your ticked LoRAs and loaded RAG map will actually affect the next
+generation: green = will apply, red = won't (hover them for the reason).
+
 ## Image editor — Gemini-style instruction editing
 
 Load one or more images and **your prompt becomes an edit instruction**:
@@ -105,6 +115,48 @@ Editor models download on first use (~12 GB / ~28 GB) after a prompt.
 Edited results land in the gallery like everything else, so you can
 chain edits: edit → select result → send it back in → edit again.
 
+## RAG maps — your own style, retrieved
+
+Load a **RAG map** (🧭) — a folder of example images paired with a trained
+LoRA, as produced by a compatible trainer (see `RAGMAP.md`). At generation
+the examples closest to your prompt guide the image via IP-Adapter, and
+the paired LoRA + trigger word are applied automatically. Embeddings-only
+("private") maps work too — the guidance comes along without the source
+images ever leaving the trainer. SDXL models only.
+
+## Reference database & face swap
+
+Point 📇 **Reference DB** at a people database (built with a companion
+tool) and pick a 👤 **Person**. In plain generation their photo
+face-guides the image (SDXL); when editing, the photo joins the editor as
+context; and **🔀** swaps their face into art with Flux Kontext, keeping
+the pose, framing, costume, lighting and art style:
+
+- **A gallery picture selected** → the face is swapped straight into it.
+- **Nothing selected** → the app first *generates* a base image from your
+  prompt + preset + LoRAs + RAG map, then swaps the face in — you keep
+  both pictures. Your style pipeline builds the art; the swap only
+  changes the person.
+
+The face can also be any **loaded image** instead of a DB person — load a
+face with 🖼 Load…, and 🔀 asks which source to use if both are set. The
+ℹ button next to the Reference DB row explains exactly what applies in
+each mode.
+
+## Quality of life
+
+- **✨ Enhance** rewrites your prompt into a richer one using a local
+  Ollama model, if you happen to run Ollama — optional, never installed,
+  nothing sent online. **↩** undoes it.
+- **Upscale 4x** runs finished images through RealESRGAN for print-size
+  output.
+- **＋Q buttons** queue generations, edits, borders and animations to run
+  one after another; the app works through the queue while you keep
+  browsing results.
+- The app **updates itself**: on start it checks GitHub for a newer
+  release and offers to swap the exe in place.
+- **Hover any control** for a tooltip explaining what it does.
+
 ## Animator — sprites & GIFs
 
 Animate any character image (ideally a transparent PNG): describe the
@@ -115,7 +167,10 @@ folder of **transparent PNG frames**, a **looping GIF**, and optionally a
 Loop modes: **Ping-pong** plays forward-then-backward for a mathematically
 perfect loop; **Crossfade** blends the ends for organic cycles. One
 generation per action builds a full sprite set (idle / walk / attack…).
-Powered by Wan 2.2 (Apache 2.0); ~18 GB, self-installs on first use.
+Besides frames and GIF you can export a **sprite sheet** (PNG + JSON
+atlas) and an **MP4/WebM video**. A preset dropdown offers 25 ready-made
+actions. Powered by Wan 2.2 (Apache 2.0); ~18 GB, self-installs on first
+use.
 
 ## Transparency
 

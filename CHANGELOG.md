@@ -1,5 +1,24 @@
 # Changelog — Comic Book Art Creator
 
+## v1.21.0 — 2026-08-12
+- **Generate + swap in one click.** 🔀 no longer needs a picture selected in
+  the gallery: with nothing selected it first generates a base image from
+  your prompt + preset + LoRAs + RAG map, then swaps the chosen face into it
+  with Flux Kontext — and keeps both pictures. With a gallery picture
+  selected it still swaps straight into that one. Your styling applies to
+  the base generation; the swap pass only changes the person.
+- **LoRA trigger words are applied automatically.** When you tick a LoRA,
+  its activation keyword(s) are read from the LoRA's own metadata (kohya /
+  `modelspec`) or a CivitAI sidecar file next to it, and quietly added to
+  the prompt sent to the engine — you never have to remember or type them.
+  Already-present words aren't doubled, and your typed prompt is untouched.
+  The CivitAI downloader now saves the trained words beside every LoRA it
+  fetches, and ➕ Add LoRA file… carries an existing sidecar along.
+- **Hover tooltips everywhere.** The whole left panel (prompt, negative,
+  model, presets, LoRAs, RAG map, canvas, steps, variations, seed), the
+  animator, and the gallery/save buttons now explain themselves on hover,
+  matching the editor tooltips added in v1.20.0.
+
 ## v1.20.0 — 2026-08-12
 - **LoRA / RAG status badges, top-right.** Two badges next to the GPU meter
   show at a glance whether LoRAs and your RAG map will affect the next

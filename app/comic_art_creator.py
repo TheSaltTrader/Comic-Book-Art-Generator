@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.20.0"
+APP_VERSION = "1.21.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1587,6 +1587,75 @@ def _read_safetensors_f32(path, key):
         return None
 
 
+def _safetensors_metadata(path):
+    """The __metadata__ dict from a safetensors header (kohya/Civitai store
+    training info there), or {} on any problem."""
+    try:
+        with open(path, "rb") as f:
+            hlen = int.from_bytes(f.read(8), "little")
+            if hlen <= 0 or hlen > 20_000_000:
+                return {}
+            head = json.loads(f.read(hlen).decode("utf-8", "replace"))
+        md = head.get("__metadata__", {})
+        return md if isinstance(md, dict) else {}
+    except Exception:
+        return {}
+
+
+_LORA_TRIGGER_CACHE = {}
+
+
+def lora_trigger(name):
+    """Best-effort activation keyword(s) for a LoRA, so the app can inject them
+    into the prompt automatically — the user never has to type the trigger by
+    hand. Looked up (in order) from:
+
+      1. a Civitai/JSON sidecar next to the file (trainedWords / activation
+         text) — the authoritative trained words when present;
+      2. the safetensors metadata `modelspec.trigger_phrase`;
+      3. the kohya `ss_output_name` as a last resort (short, alphabetic).
+
+    Returns a string ('' if nothing usable — many style LoRAs need no trigger,
+    and their weights apply regardless). Result cached per filename."""
+    if name in _LORA_TRIGGER_CACHE:
+        return _LORA_TRIGGER_CACHE[name]
+    trig = ""
+    try:
+        path = _ensure_lora_dir() / name
+        stem = path.with_suffix("")
+        for side in (Path(str(stem) + ".civitai.info"),
+                     stem.with_suffix(".json")):
+            if side.exists():
+                try:
+                    j = json.loads(side.read_text(encoding="utf-8",
+                                                  errors="replace"))
+                except Exception:
+                    continue
+                words = (j.get("trainedWords") or j.get("activation text")
+                         or j.get("trigger") or [])
+                if isinstance(words, str):
+                    words = [words]
+                words = [w.strip() for w in words
+                         if isinstance(w, str) and w.strip()]
+                if words:
+                    trig = ", ".join(words[:4])
+                    break
+        if not trig and path.exists():
+            md = _safetensors_metadata(path)
+            tp = md.get("modelspec.trigger_phrase") or md.get("ss_trigger_words")
+            if isinstance(tp, str) and tp.strip():
+                trig = tp.strip()
+            else:
+                on = md.get("ss_output_name")
+                if isinstance(on, str) and re.search(r"[A-Za-z]", on) \
+                        and len(on) <= 40 and "_" not in on[:1]:
+                    trig = on.strip()
+    except Exception:
+        trig = ""
+    _LORA_TRIGGER_CACHE[name] = trig
+    return trig
+
+
 def load_ragmap(path):
     """Load a RAG map paired with a trained LoRA. Two layouts are read:
 
@@ -1975,9 +2044,50 @@ class Generator:
                             and not border_center_clean(img):
                         img = self._clean_border_center(ws, img, p)
                     self.q.put(("image", img, p))
+                    # gen-then-swap: after the RAG/LoRA base, put the face in
+                    # with Flux Kontext and keep BOTH pictures
+                    if params.get("swap_face") and not CANCEL.is_set():
+                        swapped = self._swap_face_pass(ws, img,
+                                                       params["swap_face"])
+                        if swapped is not None:
+                            sp = dict(p)
+                            sp.pop("swap_face", None)
+                            sp["transparent"] = False
+                            sp["upscale"] = False
+                            sp["user_prompt"] = "face-swapped"
+                            self.q.put(("image", swapped, sp))
             self.q.put(("done", None))
         finally:
             ws.close()
+
+    def _swap_face_pass(self, ws, base_img, face_path):
+        """Second pass of a gen-then-swap: put a face into the freshly drawn
+        base image with Flux Kontext. Returns the swapped image, or None on
+        any failure (the base image is always kept regardless)."""
+        if CANCEL.is_set():
+            return None
+        try:
+            self.q.put(("status", "Swapping the face in (Flux Kontext)…"))
+            base_name = self._upload_pil(base_img.convert("RGB"),
+                                         "cbac_swap_base.png")
+            face_name = self._upload_ref(face_path)
+            cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
+                      edit_image_names=[base_name, face_name],
+                      out_size=(base_img.width, base_img.height),
+                      seed=0, steps=None)
+            graph = build_kontext_graph(cp)
+            r = requests.post(f"{ENGINE_URL}/prompt",
+                              json={"prompt": graph,
+                                    "client_id": self.client_id},
+                              timeout=30)
+            r.raise_for_status()
+            out = self._await_images(ws, r.json()["prompt_id"])
+            if out:
+                return self._fetch_image(out[0])
+        except Exception as e:
+            self.q.put(("status", f"Face swap skipped ({e}); kept the base "
+                                  "image."))
+        return None
 
     def _clean_border_center(self, ws, img, p):
         """Second pass: the frame came out with content in the middle —
@@ -2371,9 +2481,17 @@ class App:
         left.columnconfigure(0, weight=1)
         r = 0
 
-        ttk.Label(left, text="PROMPT", style="Head.TLabel").grid(row=r, sticky=W); r += 1
+        prompt_head = ttk.Label(left, text="PROMPT", style="Head.TLabel")
+        prompt_head.grid(row=r, sticky=W); r += 1
+        self._tip(prompt_head,
+                  "What to draw — the subject, scene and action. Be specific. "
+                  "Your chosen preset's style text is added on top at "
+                  "generation (unless you're editing a loaded image).")
         self.prompt_box = self._text(left, 6)
         self.prompt_box.grid(row=r, sticky=NSEW, pady=(2, 2)); r += 1
+        self._tip(self.prompt_box,
+                  "The main description of the image you want. When an editor "
+                  "image is loaded this becomes the edit instruction instead.")
 
         # optional prompt enhancer — only lights up if Ollama is running
         erow = ttk.Frame(left); erow.grid(row=r, sticky="ew", pady=(0, 8))
@@ -2382,25 +2500,45 @@ class App:
         self.enhance_btn = ttk.Button(erow, text="✨ Enhance", width=11,
                                       command=self._enhance_prompt)
         self.enhance_btn.grid(row=0, column=0)
+        self._tip(self.enhance_btn,
+                  "Rewrite your prompt into a richer one using a local Ollama "
+                  "model (optional — only works if you have Ollama running; "
+                  "nothing is installed or sent online).")
         self.ollama_var = StringVar()
         self.ollama_dd = ttk.Combobox(erow, textvariable=self.ollama_var,
                                       state="readonly", exportselection=False,
                                       values=[], width=18)
         self.ollama_dd.grid(row=0, column=1, sticky="ew", padx=6)
+        self._tip(self.ollama_dd,
+                  "Which local Ollama model does the enhancing. Empty if no "
+                  "Ollama is detected.")
         self.undo_enhance_btn = ttk.Button(erow, text="↩", width=3,
                                            command=self._undo_enhance)
         self.undo_enhance_btn.grid(row=0, column=2)
         self.undo_enhance_btn.state(["disabled"])
+        self._tip(self.undo_enhance_btn, "Undo the last Enhance and restore "
+                                         "your original prompt.")
         self._prompt_undo = None
 
-        ttk.Label(left, text="NEGATIVE PROMPT (kept until you clear it)",
-                  style="Head.TLabel").grid(row=r, sticky=W); r += 1
+        neg_head = ttk.Label(left, text="NEGATIVE PROMPT (kept until you "
+                                        "clear it)", style="Head.TLabel")
+        neg_head.grid(row=r, sticky=W); r += 1
+        self._tip(neg_head,
+                  "What to avoid — things you don't want in the image (extra "
+                  "limbs, text, watermarks…). Stays until you change it; note "
+                  "Turbo models largely ignore negatives.")
         self.negative_box = self._text(left, 2)
         self.negative_box.grid(row=r, sticky=NSEW, pady=(2, 8)); r += 1
 
         # model row — picked FIRST; the preset list adapts to it
-        ttk.Label(left, text="MODEL (pick first)", style="Head.TLabel").grid(
-            row=r, sticky=W); r += 1
+        model_head = ttk.Label(left, text="MODEL (pick first)",
+                               style="Head.TLabel")
+        model_head.grid(row=r, sticky=W); r += 1
+        self._tip(model_head,
+                  "The base checkpoint that draws the image. Pick it first — "
+                  "the preset and LoRA lists adapt to its family (Flux, SDXL "
+                  "or anime). Each entry shows its size and whether it fits "
+                  "your GPU.")
         mrow = ttk.Frame(left); mrow.grid(row=r, sticky=NSEW, pady=(2, 8)); r += 1
         mrow.columnconfigure(0, weight=1)
         self.model_var = StringVar()
@@ -2409,11 +2547,21 @@ class App:
         self.model_dd.grid(row=0, column=0, sticky="ew")
         self.model_dd.bind("<<ComboboxSelected>>",
                            lambda _e: self._on_model_pick())
-        ttk.Button(mrow, text="↻", width=3,
-                   command=self._refresh_models).grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(mrow, text="📁 Add model…", width=13,
-                   command=self._import_checkpoint).grid(row=0, column=2,
-                                                         padx=(6, 0))
+        self._tip(self.model_dd,
+                  "Choose the base model. Green fits your GPU comfortably, red "
+                  "is a tight fit (slower), grey is too big to load.")
+        model_refresh = ttk.Button(mrow, text="↻", width=3,
+                                   command=self._refresh_models)
+        model_refresh.grid(row=0, column=1, padx=(6, 0))
+        self._tip(model_refresh, "Rescan the models folder for newly added "
+                                 "checkpoints and LoRAs.")
+        addmodel_btn = ttk.Button(mrow, text="📁 Add model…", width=13,
+                                  command=self._import_checkpoint)
+        addmodel_btn.grid(row=0, column=2, padx=(6, 0))
+        self._tip(addmodel_btn,
+                  "Add your own .safetensors checkpoint. It is hard-linked in "
+                  "(instant, no extra disk) when on the same drive, else "
+                  "copied. The engine can load it without a restart.")
         self.vram_note = StringVar(
             value="Sizes shown per model — your video card RAM must be above "
                   "that number (keep ~2 GB headroom).")
@@ -2421,9 +2569,13 @@ class App:
                   wraplength=400).grid(row=r, sticky=W); r += 1
 
         # preset row — filtered to styles that suit the selected model
-        ttk.Label(left, text="ART STYLE PRESET (styles for the selected "
-                             "model)", style="Head.TLabel").grid(
-            row=r, sticky=W, pady=(6, 0)); r += 1
+        preset_head = ttk.Label(left, text="ART STYLE PRESET (styles for the "
+                                           "selected model)", style="Head.TLabel")
+        preset_head.grid(row=r, sticky=W, pady=(6, 0)); r += 1
+        self._tip(preset_head,
+                  "A ready-made art style. Picking one fills the Style text "
+                  "below, which is added to your prompt at generation. The list "
+                  "is filtered to styles that suit the selected model's family.")
         prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(2, 2)); r += 1
         prow.columnconfigure(0, weight=1)
         self.preset_var = StringVar(value="Marvel House Style")
@@ -2431,19 +2583,38 @@ class App:
                                       values=[NONE_PRESET], state="readonly", exportselection=False)
         self.preset_dd.grid(row=0, column=0, sticky="ew")
         self.preset_dd.bind("<<ComboboxSelected>>", self._on_preset)
-        ttk.Button(prow, text="Try example", width=11,
-                   command=self._use_example).grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(prow, text="Clear", width=6,
-                   command=self._clear_all).grid(row=0, column=2, padx=(6, 0))
+        self._tip(self.preset_dd, "Choose an art style. It sets the Style text "
+                                  "and a matching negative prompt.")
+        ex_btn = ttk.Button(prow, text="Try example", width=11,
+                            command=self._use_example)
+        ex_btn.grid(row=0, column=1, padx=(6, 0))
+        self._tip(ex_btn, "Fill the prompt with this preset's example, so you "
+                          "can generate something immediately.")
+        clr_all_btn = ttk.Button(prow, text="Clear", width=6,
+                                 command=self._clear_all)
+        clr_all_btn.grid(row=0, column=2, padx=(6, 0))
+        self._tip(clr_all_btn, "Clear the prompt, negative and style text.")
 
-        ttk.Label(left, text="Style text (appended to your prompt — editable):",
-                  style="Dim.TLabel").grid(row=r, sticky=W, pady=(6, 0)); r += 1
+        style_lbl = ttk.Label(left, text="Style text (appended to your prompt "
+                                         "— editable):", style="Dim.TLabel")
+        style_lbl.grid(row=r, sticky=W, pady=(6, 0)); r += 1
         self.style_box = self._text(left, 3)
         self.style_box.grid(row=r, sticky=NSEW, pady=(2, 8)); r += 1
+        self._tip(self.style_box,
+                  "The style wording added to your prompt (from the preset, but "
+                  "fully editable). Cleared/ignored while editing a loaded "
+                  "image.")
 
         # loras — one list, tick any number of them
-        ttk.Label(left, text="LORAS (tick to apply — match SDXL/Flux to the model)",
-                  style="Head.TLabel").grid(row=r, sticky=W); r += 1
+        lora_head = ttk.Label(left, text="LORAS (tick to apply — match "
+                                         "SDXL/Flux to the model)",
+                              style="Head.TLabel")
+        lora_head.grid(row=r, sticky=W); r += 1
+        self._tip(lora_head,
+                  "LoRAs are small style/character add-ons for the base model. "
+                  "Tick any number to apply them. Match the LoRA's family "
+                  "(SDXL or Flux) to your model. Each ticked LoRA's activation "
+                  "keyword is added to the prompt for you automatically.")
         lframe = ttk.Frame(left); lframe.grid(row=r, sticky=NSEW, pady=2); r += 1
         lframe.columnconfigure(0, weight=1)
         self.lora_list = Listbox(lframe, selectmode="multiple",
@@ -2460,23 +2631,42 @@ class App:
         self.lora_list.bind("<<ListboxSelect>>",
                             lambda _e: (self._schedule_persist(),
                                         self._refresh_mode_badges()))
+        self._tip(self.lora_list,
+                  "Click to tick/untick LoRAs (Ctrl-click for several). Ticked "
+                  "ones apply to the next generation and light the green LoRA "
+                  "badge; their trigger words are added automatically.")
         limprow = ttk.Frame(left); limprow.grid(row=r, sticky=NSEW,
                                                 pady=(2, 0)); r += 1
-        ttk.Button(limprow, text="➕ Add LoRA file…",
-                   command=self._import_lora).pack(side="left")
-        ttk.Button(limprow, text="↻", width=3,
-                   command=self._refresh_models).pack(side="left", padx=(4, 0))
-        ttk.Button(limprow, text="🗑 Remove", command=self._remove_lora,
-                   style="Danger.TButton").pack(side="left", padx=(4, 0))
-        ttk.Button(limprow, text="📁 LoRA folder",
-                   command=lambda: os.startfile(
-                       str(_ensure_lora_dir()))).pack(side="left", padx=(4, 0))
+        addlora_btn = ttk.Button(limprow, text="➕ Add LoRA file…",
+                                 command=self._import_lora)
+        addlora_btn.pack(side="left")
+        self._tip(addlora_btn, "Copy a .safetensors LoRA into your LoRA folder "
+                               "so it appears in the list.")
+        lora_refresh = ttk.Button(limprow, text="↻", width=3,
+                                  command=self._refresh_models)
+        lora_refresh.pack(side="left", padx=(4, 0))
+        self._tip(lora_refresh, "Rescan the LoRA folder.")
+        rmlora_btn = ttk.Button(limprow, text="🗑 Remove",
+                                command=self._remove_lora, style="Danger.TButton")
+        rmlora_btn.pack(side="left", padx=(4, 0))
+        self._tip(rmlora_btn, "Delete the ticked LoRA file(s) from your LoRA "
+                              "folder (asks first). This removes the file, not "
+                              "just the tick.")
+        lorafld_btn = ttk.Button(limprow, text="📁 LoRA folder",
+                                 command=lambda: os.startfile(
+                                     str(_ensure_lora_dir())))
+        lorafld_btn.pack(side="left", padx=(4, 0))
+        self._tip(lorafld_btn, "Open the LoRA folder in Explorer.")
         strow = ttk.Frame(left); strow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         ttk.Label(strow, text="LoRA strength",
                   style="Dim.TLabel").pack(side="left")
         self.lora_strength = DoubleVar(value=0.8)
-        ttk.Scale(strow, from_=0.0, to=1.5, variable=self.lora_strength,
-                  length=160).pack(side="left", padx=6)
+        lora_scale = ttk.Scale(strow, from_=0.0, to=1.5,
+                               variable=self.lora_strength, length=160)
+        lora_scale.pack(side="left", padx=6)
+        self._tip(lora_scale,
+                  "How strongly the ticked LoRAs affect the image (applies to "
+                  "all of them). ~0.6–0.9 is typical; too high can distort.")
         self.lora_strength_lab = ttk.Label(strow, text="0.80", width=5,
                                            style="Dim.TLabel")
         self.lora_strength_lab.pack(side="left")
@@ -2488,44 +2678,69 @@ class App:
         ragrow = ttk.Frame(left); ragrow.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
         ragrow.columnconfigure(1, weight=1)
-        ttk.Button(ragrow, text="🧭 RAG map…", width=12,
-                   command=self._pick_ragmap).grid(row=0, column=0)
+        ragmap_btn = ttk.Button(ragrow, text="🧭 RAG map…", width=12,
+                                command=self._pick_ragmap)
+        ragmap_btn.grid(row=0, column=0)
+        self._tip(ragmap_btn,
+                  "Load a RAG map — example images paired with a LoRA. At "
+                  "generation the closest examples for your prompt guide the "
+                  "image via IP-Adapter (SDXL only), and the paired LoRA + "
+                  "trigger are applied automatically. Lights the green RAG "
+                  "badge when active.")
         self.ragmap_var = StringVar(value="none")
         ttk.Label(ragrow, textvariable=self.ragmap_var, style="Dim.TLabel",
                   wraplength=230).grid(row=0, column=1, sticky=W, padx=6)
-        ttk.Button(ragrow, text="🗑 Remove", width=10,
-                   command=self._clear_ragmap).grid(row=0, column=2)
+        ragrm_btn = ttk.Button(ragrow, text="🗑 Remove", width=10,
+                               command=self._clear_ragmap)
+        ragrm_btn.grid(row=0, column=2)
+        self._tip(ragrm_btn, "Stop using the RAG map (the map file is left "
+                             "alone).")
 
         # size + settings
-        ttk.Label(left, text="CANVAS & SETTINGS", style="Head.TLabel").grid(
-            row=r, sticky=W, pady=(8, 0)); r += 1
+        cs_head = ttk.Label(left, text="CANVAS & SETTINGS", style="Head.TLabel")
+        cs_head.grid(row=r, sticky=W, pady=(8, 0)); r += 1
+        self._tip(cs_head, "Output size and per-generation settings.")
         srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=2); r += 1
         srow.columnconfigure(0, weight=1)
         self.size_var = StringVar(value="Wide — splash (1344x768)")
-        ttk.Combobox(srow, textvariable=self.size_var, state="readonly",
-                     exportselection=False,
-                     values=list(SIZE_PRESETS)).grid(row=0, column=0, sticky="ew")
+        size_dd = ttk.Combobox(srow, textvariable=self.size_var,
+                               state="readonly", exportselection=False,
+                               values=list(SIZE_PRESETS))
+        size_dd.grid(row=0, column=0, sticky="ew")
+        self._tip(size_dd, "Output width × height. Wider/taller uses more VRAM "
+                           "and time.")
 
         grow = ttk.Frame(left); grow.grid(row=r, sticky=NSEW, pady=4); r += 1
         ttk.Label(grow, text="Steps", style="Dim.TLabel").grid(row=0, column=0)
         self.steps_var = StringVar(value="auto")
-        ttk.Combobox(grow, textvariable=self.steps_var, width=6,
-                     exportselection=False,
-                     values=["auto", "8", "12", "20", "28", "35", "50"]).grid(
-            row=0, column=1, padx=(4, 12))
+        steps_dd = ttk.Combobox(grow, textvariable=self.steps_var, width=6,
+                                exportselection=False,
+                                values=["auto", "8", "12", "20", "28", "35", "50"])
+        steps_dd.grid(row=0, column=1, padx=(4, 12))
+        self._tip(steps_dd, "Sampling steps. 'auto' picks a good value per "
+                            "model family. More steps = slower, sometimes "
+                            "cleaner; Turbo models need very few.")
         ttk.Label(grow, text="Variations", style="Dim.TLabel").grid(row=0,
                                                                     column=2)
         self.batch_var = IntVar(value=1)
-        ttk.Spinbox(grow, from_=1, to=10, textvariable=self.batch_var,
-                    exportselection=False,
-                    width=4).grid(row=0, column=3, padx=(4, 12))
+        batch_sb = ttk.Spinbox(grow, from_=1, to=10, textvariable=self.batch_var,
+                               exportselection=False, width=4)
+        batch_sb.grid(row=0, column=3, padx=(4, 12))
+        self._tip(batch_sb, "How many images to make from this one prompt "
+                            "(each with a different seed) so you can pick the "
+                            "best.")
         self.transparent_var = BooleanVar(value=False)
-        ttk.Checkbutton(grow, text="Transparent BG",
-                        variable=self.transparent_var).grid(row=0, column=4)
+        trans_cb = ttk.Checkbutton(grow, text="Transparent BG",
+                                   variable=self.transparent_var)
+        trans_cb.grid(row=0, column=4)
+        self._tip(trans_cb, "Cut out the background so the subject is on "
+                            "transparency (PNG). Good for stickers/sprites.")
         self.upscale_var = BooleanVar(value=False)
-        ttk.Checkbutton(grow, text="Upscale 4x (hi-res)",
-                        variable=self.upscale_var).grid(row=0, column=5,
-                                                        padx=(12, 0))
+        up_cb = ttk.Checkbutton(grow, text="Upscale 4x (hi-res)",
+                                variable=self.upscale_var)
+        up_cb.grid(row=0, column=5, padx=(12, 0))
+        self._tip(up_cb, "Run the finished image through a 4× hi-res upscaler. "
+                         "Slower and uses more VRAM.")
 
         seedrow = ttk.Frame(left); seedrow.grid(row=r, sticky=NSEW, pady=4); r += 1
         ttk.Label(seedrow, text="Seed", style="Dim.TLabel").grid(row=0, column=0)
@@ -2533,11 +2748,21 @@ class App:
         self.seed_entry = ttk.Entry(seedrow, textvariable=self.seed_var,
                                     exportselection=False, width=12)
         self.seed_entry.grid(row=0, column=1, padx=(4, 10))
+        self._tip(self.seed_entry,
+                  "The random seed. The same seed + settings reproduces the "
+                  "same image. Ignored while Random is ticked.")
         self.random_seed_var = BooleanVar(value=True)
-        ttk.Checkbutton(seedrow, text="Random",
-                        variable=self.random_seed_var).grid(row=0, column=2)
-        ttk.Button(seedrow, text="Reuse last", width=10,
-                   command=self._reuse_seed).grid(row=0, column=3, padx=(10, 0))
+        rand_cb = ttk.Checkbutton(seedrow, text="Random",
+                                  variable=self.random_seed_var)
+        rand_cb.grid(row=0, column=2)
+        self._tip(rand_cb, "Use a fresh random seed each generation (untick to "
+                           "lock the seed above).")
+        reuse_btn = ttk.Button(seedrow, text="Reuse last", width=10,
+                               command=self._reuse_seed)
+        reuse_btn.grid(row=0, column=3, padx=(10, 0))
+        self._tip(reuse_btn, "Copy the seed of the selected image and turn off "
+                             "Random, so you can tweak the prompt on the same "
+                             "seed.")
 
         # image editor — Gemini-style instruction editing
         r = self._rule(left, r)
@@ -2629,12 +2854,16 @@ class App:
         self.swap_btn.grid(row=0, column=0)
         self.swap_btn.state(["disabled"])   # until a target + a face exist
         self._tip(self.swap_btn,
-                  "Put a face into the selected picture with Flux Kontext, "
-                  "keeping the pose, framing, costume, lighting and art style. "
-                  "The face can be the Reference DB person or a loaded image — "
-                  "if both are available you'll be asked which. A loaded image "
-                  "used here is cleared afterwards, so LoRAs/RAG turn back on.")
-        ttk.Label(srow, text="face → selected picture",
+                  "Put a face into a picture with Flux Kontext, keeping the "
+                  "pose, framing, costume, lighting and art style. The face is "
+                  "the Reference DB person or a loaded image (asked if both). "
+                  "With a gallery picture selected, it swaps straight into that "
+                  "picture. With nothing selected, it first generates a base "
+                  "image from your prompt + preset + LoRAs + RAG, then swaps "
+                  "the face into it — keeping both. LoRAs/RAG apply to the base "
+                  "generation, never to the swap itself.")
+        ttk.Label(srow, text="generate + swap a face in (or swap into the "
+                             "selected picture)",
                   style="Dim.TLabel", wraplength=230).grid(
             row=0, column=1, sticky=W, padx=6)
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
@@ -2689,22 +2918,35 @@ class App:
 
         # ---------- animator (old-school sprite animation) ----------
         r = self._rule(left, r)
-        ttk.Label(left, text="ANIMATOR — animate a character image into "
-                             "sprite frames & GIF", style="Head.TLabel",
-                  wraplength=400, justify="left").grid(
-            row=r, sticky=W, pady=(14, 0)); r += 1
+        anim_head = ttk.Label(left, text="ANIMATOR — animate a character image "
+                                         "into sprite frames & GIF",
+                              style="Head.TLabel", wraplength=400,
+                              justify="left")
+        anim_head.grid(row=r, sticky=W, pady=(14, 0)); r += 1
+        self._tip(anim_head,
+                  "Turn a single character image into a short looping "
+                  "animation (sprite frames + GIF, optional MP4/WebM/sprite "
+                  "sheet). Pick a character image, describe the action, and "
+                  "generate. Uses a video model — the first run downloads it.")
         arow = ttk.Frame(left); arow.grid(row=r, sticky=NSEW, pady=2); r += 1
         arow.columnconfigure(1, weight=1)
-        ttk.Button(arow, text="🖼 Character…", width=12,
-                   command=self._pick_anim_image).grid(row=0, column=0)
+        animchar_btn = ttk.Button(arow, text="🖼 Character…", width=12,
+                                  command=self._pick_anim_image)
+        animchar_btn.grid(row=0, column=0)
+        self._tip(animchar_btn, "Load the character image to animate (works "
+                                "best on a clean single character).")
         self.anim_img_var = StringVar(value="none")
         ttk.Label(arow, textvariable=self.anim_img_var, style="Dim.TLabel",
                   wraplength=180).grid(row=0, column=1, sticky=W, padx=6)
-        ttk.Button(arow, text="Use current", width=11,
-                   command=self._use_current_for_anim).grid(row=0, column=2)
-        ttk.Button(arow, text="✕", width=3,
-                   command=self._clear_anim_image).grid(row=0, column=3,
-                                                        padx=(4, 0))
+        animcur_btn = ttk.Button(arow, text="Use current", width=11,
+                                 command=self._use_current_for_anim)
+        animcur_btn.grid(row=0, column=2)
+        self._tip(animcur_btn, "Animate the image currently selected in the "
+                               "gallery.")
+        animclr_btn = ttk.Button(arow, text="✕", width=3,
+                                 command=self._clear_anim_image)
+        animclr_btn.grid(row=0, column=3, padx=(4, 0))
+        self._tip(animclr_btn, "Clear the chosen character image.")
         prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(4, 0))
         r += 1
         prow.columnconfigure(1, weight=1)
@@ -2716,71 +2958,107 @@ class App:
                            values=list(ANIM_PRESETS), width=30)
         pcb.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         pcb.bind("<<ComboboxSelected>>", self._on_anim_preset)
-        ttk.Label(left, text="Action (what the character does):",
-                  style="Dim.TLabel").grid(row=r, sticky=W); r += 1
+        self._tip(pcb, "A ready-made action (walk, wave, attack…). Picking one "
+                       "fills the Action box below; you can still edit it.")
+        anim_act_lbl = ttk.Label(left, text="Action (what the character does):",
+                                 style="Dim.TLabel")
+        anim_act_lbl.grid(row=r, sticky=W); r += 1
         self.anim_prompt_box = self._text(left, 2)
         self.anim_prompt_box.grid(row=r, sticky="ew", pady=(2, 4)); r += 1
+        self._tip(self.anim_prompt_box,
+                  "Describe the motion as a repeating cycle (e.g. 'walking in "
+                  "place, arms swinging'). Phrase it as a loop for a seamless "
+                  "GIF.")
         a2 = ttk.Frame(left); a2.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(a2, text="Seconds", style="Dim.TLabel").grid(row=0,
                                                                column=0)
         self.anim_secs_var = IntVar(value=3)
-        ttk.Spinbox(a2, from_=1, to=5, textvariable=self.anim_secs_var,
-                    exportselection=False, width=3).grid(row=0, column=1,
-                                                         padx=(4, 10))
+        secs_sb = ttk.Spinbox(a2, from_=1, to=5, textvariable=self.anim_secs_var,
+                              exportselection=False, width=3)
+        secs_sb.grid(row=0, column=1, padx=(4, 10))
+        self._tip(secs_sb, "Clip length in seconds. Longer clips give a "
+                           "cleaner seamless loop (3–5s recommended).")
         ttk.Label(a2, text="Keep", style="Dim.TLabel").grid(row=0, column=2)
         self.anim_keep_var = StringVar(value=list(ANIM_KEEP)[1])
-        ttk.Combobox(a2, textvariable=self.anim_keep_var, state="readonly",
-                     exportselection=False, values=list(ANIM_KEEP),
-                     width=17).grid(row=0, column=3, padx=(4, 0))
+        keep_dd = ttk.Combobox(a2, textvariable=self.anim_keep_var,
+                               state="readonly", exportselection=False,
+                               values=list(ANIM_KEEP), width=17)
+        keep_dd.grid(row=0, column=3, padx=(4, 0))
+        self._tip(keep_dd, "How many of the rendered frames to keep — fewer "
+                           "frames = smaller, snappier GIF.")
         a3 = ttk.Frame(left); a3.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(a3, text="Loop", style="Dim.TLabel").grid(row=0, column=0)
         self.anim_loop_var = StringVar(value=ANIM_LOOPS[0])
-        ttk.Combobox(a3, textvariable=self.anim_loop_var, state="readonly",
-                     exportselection=False, values=ANIM_LOOPS,
-                     width=22).grid(row=0, column=1, padx=(4, 10))
+        loop_dd = ttk.Combobox(a3, textvariable=self.anim_loop_var,
+                               state="readonly", exportselection=False,
+                               values=ANIM_LOOPS, width=22)
+        loop_dd.grid(row=0, column=1, padx=(4, 10))
+        self._tip(loop_dd, "How the clip is made to loop: seamless auto-cut "
+                           "(picks the best matching cycle), ping-pong, or "
+                           "crossfade.")
         self.anim_size_var = StringVar(value=list(ANIM_SIZES)[0])
-        ttk.Combobox(a3, textvariable=self.anim_size_var, state="readonly",
-                     exportselection=False, values=list(ANIM_SIZES),
-                     width=18).grid(row=0, column=2)
+        anim_size_dd = ttk.Combobox(a3, textvariable=self.anim_size_var,
+                                    state="readonly", exportselection=False,
+                                    values=list(ANIM_SIZES), width=18)
+        anim_size_dd.grid(row=0, column=2)
+        self._tip(anim_size_dd, "Frame size of the animation.")
         a3b = ttk.Frame(left); a3b.grid(row=r, sticky=NSEW, pady=2); r += 1
         ttk.Label(a3b, text="Motion", style="Dim.TLabel").grid(row=0,
                                                                column=0)
         self.anim_motion_var = StringVar(value=list(ANIM_MOTION)[0])
-        ttk.Combobox(a3b, textvariable=self.anim_motion_var,
-                     state="readonly", exportselection=False,
-                     values=list(ANIM_MOTION),
-                     width=22).grid(row=0, column=1, padx=(4, 0))
+        motion_dd = ttk.Combobox(a3b, textvariable=self.anim_motion_var,
+                                 state="readonly", exportselection=False,
+                                 values=list(ANIM_MOTION), width=22)
+        motion_dd.grid(row=0, column=1, padx=(4, 0))
+        self._tip(motion_dd, "How much the character moves: Subtle, Normal or "
+                             "Strong (Strong = large, exaggerated motion).")
         a4 = ttk.Frame(left); a4.grid(row=r, sticky=NSEW, pady=2); r += 1
         self.anim_transparent_var = BooleanVar(value=True)
-        ttk.Checkbutton(a4, text="Transparent frames",
-                        variable=self.anim_transparent_var).pack(side="left")
+        atrans_cb = ttk.Checkbutton(a4, text="Transparent frames",
+                                    variable=self.anim_transparent_var)
+        atrans_cb.pack(side="left")
+        self._tip(atrans_cb, "Cut out the background on each frame so the "
+                             "animation is on transparency.")
         self.anim_gif_var = BooleanVar(value=True)
-        ttk.Checkbutton(a4, text="Make GIF",
-                        variable=self.anim_gif_var).pack(side="left",
-                                                         padx=(12, 0))
+        agif_cb = ttk.Checkbutton(a4, text="Make GIF",
+                                  variable=self.anim_gif_var)
+        agif_cb.pack(side="left", padx=(12, 0))
+        self._tip(agif_cb, "Also save a looping GIF alongside the frames.")
         self.anim_zip_var = BooleanVar(value=True)
-        ttk.Checkbutton(a4, text="Zip folder",
-                        variable=self.anim_zip_var).pack(side="left",
-                                                         padx=(12, 0))
+        azip_cb = ttk.Checkbutton(a4, text="Zip folder",
+                                  variable=self.anim_zip_var)
+        azip_cb.pack(side="left", padx=(12, 0))
+        self._tip(azip_cb, "Zip the frames folder for easy sharing.")
         a5 = ttk.Frame(left); a5.grid(row=r, sticky=NSEW, pady=(0, 2)); r += 1
         self.anim_sheet_var = BooleanVar(value=False)
-        ttk.Checkbutton(a5, text="Sprite sheet",
-                        variable=self.anim_sheet_var).pack(side="left")
+        asheet_cb = ttk.Checkbutton(a5, text="Sprite sheet",
+                                    variable=self.anim_sheet_var)
+        asheet_cb.pack(side="left")
+        self._tip(asheet_cb, "Also export a single sprite-sheet PNG + JSON "
+                             "atlas of all frames.")
         self.anim_video_var = StringVar(value="none")
         ttk.Label(a5, text="Video", style="Dim.TLabel").pack(side="left",
                                                              padx=(12, 2))
-        ttk.Combobox(a5, textvariable=self.anim_video_var, state="readonly",
-                     exportselection=False,
-                     values=["none", "MP4", "WebM"], width=7).pack(side="left")
+        avid_dd = ttk.Combobox(a5, textvariable=self.anim_video_var,
+                               state="readonly", exportselection=False,
+                               values=["none", "MP4", "WebM"], width=7)
+        avid_dd.pack(side="left")
+        self._tip(avid_dd, "Also export a video file (MP4 or WebM) — opaque, "
+                           "no transparency.")
         anrow = ttk.Frame(left); anrow.grid(row=r, sticky=NSEW,
                                             pady=(4, 2)); r += 1
         anrow.columnconfigure(0, weight=1)
-        ttk.Button(anrow, text="🎬 Generate animation", style="Go.TButton",
-                   command=self._generate_animation).grid(row=0, column=0,
-                                                          sticky="ew")
-        ttk.Button(anrow, text="＋Q", width=4,
-                   command=lambda: self._generate_animation(queue=True)).grid(
-            row=0, column=1, padx=(4, 0))
+        genanim_btn = ttk.Button(anrow, text="🎬 Generate animation",
+                                 style="Go.TButton",
+                                 command=self._generate_animation)
+        genanim_btn.grid(row=0, column=0, sticky="ew")
+        self._tip(genanim_btn, "Make the animation now from the chosen "
+                               "character image and action.")
+        animq_btn = ttk.Button(anrow, text="＋Q", width=4,
+                               command=lambda: self._generate_animation(queue=True))
+        animq_btn.grid(row=0, column=1, padx=(4, 0))
+        self._tip(animq_btn, "Add this animation to the batch queue to run "
+                             "after the current jobs, instead of now.")
         apb = ttk.Frame(left); apb.grid(row=r, sticky=NSEW, pady=(0, 8)); r += 1
         apb.columnconfigure(0, weight=1)
         self.anim_progress = ttk.Progressbar(apb, mode="determinate")
@@ -2970,15 +3248,33 @@ class App:
         self.canvas.bind("<Configure>", lambda e: self._show_current())
 
         brow = ttk.Frame(right); brow.grid(row=2, column=0, sticky=NSEW, pady=(8, 4))
-        ttk.Button(brow, text="💾 Save As…", command=self._save_as).pack(side="left")
-        ttk.Button(brow, text="🗑 Delete image",
-                   command=self._delete_current).pack(side="left", padx=6)
-        ttk.Button(brow, text="📁 Open output folder",
-                   command=lambda: os.startfile(OUTPUT)).pack(side="left", padx=6)
-        ttk.Button(brow, text="⬇ Get LoRAs (CivitAI)",
-                   command=self._civitai_dialog).pack(side="left", padx=6)
-        ttk.Button(brow, text="⭐ Add to training set",
-                   command=self._add_to_training).pack(side="left", padx=6)
+        saveas_btn = ttk.Button(brow, text="💾 Save As…", command=self._save_as)
+        saveas_btn.pack(side="left")
+        self._tip(saveas_btn, "Save the selected image (or GIF) somewhere of "
+                              "your choosing. Every image is also auto-saved to "
+                              "the output folder.")
+        delimg_btn = ttk.Button(brow, text="🗑 Delete image",
+                                command=self._delete_current)
+        delimg_btn.pack(side="left", padx=6)
+        self._tip(delimg_btn, "Delete the selected image file and remove it "
+                              "from the gallery.")
+        openout_btn = ttk.Button(brow, text="📁 Open output folder",
+                                 command=lambda: os.startfile(OUTPUT))
+        openout_btn.pack(side="left", padx=6)
+        self._tip(openout_btn, "Open the folder where generated images are "
+                               "saved.")
+        civ_btn = ttk.Button(brow, text="⬇ Get LoRAs (CivitAI)",
+                             command=self._civitai_dialog)
+        civ_btn.pack(side="left", padx=6)
+        self._tip(civ_btn, "Download a LoRA from a CivitAI link (needs a free "
+                           "API key). Its trained words are saved so the "
+                           "trigger is applied automatically when ticked.")
+        addtrain_btn = ttk.Button(brow, text="⭐ Add to training set",
+                                  command=self._add_to_training)
+        addtrain_btn.pack(side="left", padx=6)
+        self._tip(addtrain_btn, "Save the selected image + its prompt into a "
+                                "dataset folder, for training your own LoRA "
+                                "later with an external trainer.")
         self.info_var = StringVar(value="")
         ttk.Label(brow, textvariable=self.info_var,
                   style="Dim.TLabel").pack(side="right")
@@ -3005,12 +3301,21 @@ class App:
             "<MouseWheel>",
             lambda e: self.gallery_canvas.xview_scroll(
                 -1 if e.delta > 0 else 1, "units"))
+        self._tip(self.gallery_canvas, "Your generated images this session. "
+                  "Click a thumbnail to select it — Swap and the editor act on "
+                  "the selected picture.")
         gbtns = ttk.Frame(gwrap)
         gbtns.grid(row=0, column=1, rowspan=2, sticky="s", padx=(8, 0))
-        ttk.Button(gbtns, text="🗑 Clear history",
-                   command=self._clear_history).pack(fill="x", pady=(0, 3))
-        ttk.Button(gbtns, text="❌ Delete art files…",
-                   command=self._delete_history_files).pack(fill="x")
+        clrhist_btn = ttk.Button(gbtns, text="🗑 Clear history",
+                                 command=self._clear_history)
+        clrhist_btn.pack(fill="x", pady=(0, 3))
+        self._tip(clrhist_btn, "Clear the gallery strip for this session. The "
+                               "image files on disk are kept.")
+        delfiles_btn = ttk.Button(gbtns, text="❌ Delete art files…",
+                                  command=self._delete_history_files)
+        delfiles_btn.pack(fill="x")
+        self._tip(delfiles_btn, "Permanently delete the generated image files "
+                                "from the output folder (asks first).")
 
     # -------------------------------------------------- persistence
     def _get(self, box):
@@ -3198,7 +3503,9 @@ class App:
             "  • LoRAs + RAG + person combine: the LoRAs and RAG map build\n"
             "    the styled body/scene and the person face-guides it, all in\n"
             "    one pass. A private (embeds-only) map and a person now chain\n"
-            "    on one IP-Adapter instead of the person replacing the map.\n\n"
+            "    on one IP-Adapter instead of the person replacing the map.\n"
+            "  • Ticked LoRAs' trigger words are added to the prompt\n"
+            "    automatically (read from the LoRA's own metadata/sidecar)\n\n"
             "IMAGE EDITING (editor image(s) loaded, or ➡ To editor):\n"
             "  • Your prompt becomes the edit instruction\n"
             "  • Style preset, LoRAs and RAG map — NOT applied\n"
@@ -3206,8 +3513,11 @@ class App:
             "  • Reference DB person — the photo is handed to the editor\n"
             "    as context, so it can draw that person into the result\n"
             "  • 🔀 Swap into selected — one click sends the selected image\n"
-            "    plus the chosen person to Kontext with a ready-made\n"
-            "    'replace the person, keep everything else' instruction\n\n"
+            "    plus the chosen face to Kontext with a ready-made\n"
+            "    'replace the person, keep everything else' instruction.\n"
+            "    With NO picture selected it generates a base image first\n"
+            "    (preset + LoRAs + RAG all on), then swaps the face into\n"
+            "    it — both pictures are kept\n\n"
             "Tip: for LoRA-styled fresh art guided by a face, select the "
             "person and generate WITHOUT editor images on an SDXL model. "
             "To restyle or stage the person directly, use ➡ To editor and "
@@ -3737,6 +4047,16 @@ class App:
             try:
                 shutil.copy2(src, dest)
                 added.append(src.name)
+                # bring any trained-words sidecar along so the activation
+                # keyword is injected automatically when the LoRA is ticked
+                for ext in (".civitai.info", ".json"):
+                    side = src.with_suffix(ext)
+                    if side.exists():
+                        try:
+                            shutil.copy2(side, dest.with_suffix(ext))
+                        except OSError:
+                            pass
+                _LORA_TRIGGER_CACHE.pop(src.name, None)   # re-read fresh
             except OSError as e:
                 skipped.append(f"{src.name} ({e})")
         # make the freshly added ones tick on the next list rebuild
@@ -4605,26 +4925,20 @@ class App:
         return choice["v"]
 
     def _swap_person_in(self):
-        """One click: put a face — the Reference DB person OR a loaded editor
-        image — into the selected picture with Flux Kontext, keeping the pose,
-        framing, costume, lighting and art style. The styling is already baked
-        into the picture being edited, so this runs as an edit (presets/LoRAs/
-        RAG off). A loaded image used here is cleared afterwards, dropping the
-        app back to normal generation (LoRAs/RAG on again)."""
+        """Put a face into a picture with Flux Kontext, keeping the pose,
+        framing, costume, lighting and art style. The face is the selected
+        Reference DB person OR a loaded image (asked if both). Context-aware:
+
+        • a still is selected in the gallery -> swap the face straight into
+          that picture (one Kontext pass, no generation);
+        • nothing is selected -> two parts: generate a base image from the
+          prompt + preset + LoRAs + RAG, then swap the face into it. Both the
+          base and the swapped result are kept.
+        """
         if self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
-            return
-        if self.current is None or not self.session:
-            messagebox.showinfo("Swap into selected",
-                                "Generate or select a picture to swap a face "
-                                "into first.")
-            return
-        img, _params, path = self.session[self.current]
-        if str(path).lower().endswith(".gif"):
-            self.status_var.set("Pick a still image to swap into — GIFs can't "
-                                "be edited directly.")
             return
 
         # the face to put in: the DB person, a loaded image, or (if both) ask
@@ -4634,56 +4948,73 @@ class App:
             which = self._ask_swap_source()
             if which is None:
                 return
-            source = person if which == "db" else loaded
+            face = person if which == "db" else loaded
             label = "the Reference DB person" if which == "db" \
                 else Path(loaded).name
         elif person:
-            source, label = person, "the Reference DB person"
+            face, label = person, "the Reference DB person"
         elif loaded:
-            source, label = loaded, Path(loaded).name
+            face, label = loaded, Path(loaded).name
         else:
             messagebox.showinfo(
                 "Swap into selected",
-                "Choose a face to swap in first — pick a person (👤 Person…) "
-                "or load an image (🖼 Load…).")
+                "Choose a face to swap in — pick a person (👤 Person…) or "
+                "load an image (🖼 Load…).")
             return
 
-        # Kontext is the identity-preserving editor; make sure it can run.
+        # Kontext is the identity-preserving editor; it handles the swap in
+        # both paths, so make sure it can run before doing anything.
         if not self._ensure_editor_ready("kontext"):
             return
 
-        # the loaded editor image is consumed by the swap: clear it so the app
-        # returns to normal generation (LoRAs/RAG come back on).
+        # a still selected in the gallery = swap straight into it (no gen)
+        gallery = None
+        if self.current is not None and self.session:
+            gimg, _gp, gpath = self.session[self.current]
+            if not str(gpath).lower().endswith(".gif"):
+                gallery = (gimg, str(gpath))
+
+        # either way the loaded image is consumed as the face; clear it so the
+        # app returns to normal generation (LoRAs/RAG on again)
         if self.ref_paths:
             self.ref_paths = []
             self.ref_var.set("none — text only")
         self._refresh_editor_state()
 
-        try:
-            iw, ih = img.size
-        except Exception:
-            iw, ih = SIZE_PRESETS[self.size_var.get()]
-        params = dict(
-            prompt=SWAP_PERSON_PROMPT, user_prompt="swap face in",
-            style="", negative="", model="editor:kontext",
-            loras=[], width=iw, height=ih, seed=0, steps=None, cfg=None,
-            batch=1, random_seed=False, transparent=False, upscale=False,
-            preset=self.preset_var.get(),
-            ref_images=[str(path), source],
-            rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
-            editor="kontext",
-            out_size=(iw, ih) if self.editor_canvas_var.get() else None,
-            denoise=1.0)
+        if gallery is not None:
+            target_img, target_path = gallery
+            try:
+                iw, ih = target_img.size
+            except Exception:
+                iw, ih = SIZE_PRESETS[self.size_var.get()]
+            params = dict(
+                prompt=SWAP_PERSON_PROMPT, user_prompt="face-swapped",
+                style="", negative="", model="editor:kontext",
+                loras=[], width=iw, height=ih, seed=0, steps=None, cfg=None,
+                batch=1, random_seed=False, transparent=False, upscale=False,
+                preset=self.preset_var.get(),
+                ref_images=[target_path, face],
+                rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
+                editor="kontext",
+                out_size=(iw, ih) if self.editor_canvas_var.get() else None,
+                denoise=1.0)
+            self.status_var.set(f"Swapping {label} into the selected picture "
+                                "with Flux Kontext…")
+            CANCEL.clear()
+            self.busy = True
+            self.go_btn.state(["disabled"])
+            self.progress["value"] = 0
+            self._schedule_persist()
+            gen = Generator(self.ui_queue)
+            threading.Thread(target=gen.run, args=(params,), daemon=True).start()
+            return
 
-        self.status_var.set(f"Swapping {label} into the selected picture "
-                            "with Flux Kontext…")
-        CANCEL.clear()
-        self.busy = True
-        self.go_btn.state(["disabled"])
-        self.progress["value"] = 0
-        self._schedule_persist()
-        gen = Generator(self.ui_queue)
-        threading.Thread(target=gen.run, args=(params,), daemon=True).start()
+        # nothing selected: generate a RAG/LoRA base, then swap the face in.
+        # _generate(swap_face=…) forces a fresh generation and the Generator
+        # runs the Kontext swap after the base is drawn (keeping both).
+        self.status_var.set(f"Generating a base image, then swapping {label} "
+                            "in…")
+        self._generate(swap_face=face)
 
     def _tip(self, widget, text):
         """Attach a hover tooltip and keep a reference so it isn't collected."""
@@ -4710,16 +5041,16 @@ class App:
 
     def _refresh_editor_state(self):
         """After anything that changes the editor's inputs: enable/disable the
-        editor buttons and repaint the mode badges. Swap needs a target (a
-        history image) AND a face (a DB person or a loaded image)."""
-        has_target = bool(self.session)
+        editor buttons and repaint the mode badges. Swap needs a face — a DB
+        person or a loaded image; with a gallery picture selected it swaps into
+        that, otherwise it generates a RAG/LoRA base and swaps into that."""
+        has_gallery = bool(self.session)
         if hasattr(self, "editor_use_btn"):
             self.editor_use_btn.state(
-                ["!disabled"] if has_target else ["disabled"])
+                ["!disabled"] if has_gallery else ["disabled"])
         if hasattr(self, "swap_btn"):
-            has_source = bool(self.actor_sel) or bool(self.ref_paths)
-            self.swap_btn.state(
-                ["!disabled"] if (has_target and has_source) else ["disabled"])
+            has_face = bool(self.actor_sel) or bool(self.ref_paths)
+            self.swap_btn.state(["!disabled"] if has_face else ["disabled"])
         self._refresh_mode_badges()
 
     def _update_editor_btn(self):
@@ -4732,7 +5063,7 @@ class App:
             self.random_seed_var.set(False)
 
     # -------------------------------------------------- generation
-    def _generate(self, queue=False):
+    def _generate(self, queue=False, swap_face=None):
         if not queue and self._busy_guard():
             return
         if not engine_alive():
@@ -4744,13 +5075,16 @@ class App:
                                           "preset and hit 'Try example'.")
             return
         style = self._get(self.style_box)
-        # a reference is a full override: the image supplies the art
-        # style, so the preset's style text (and LoRAs) are not applied
-        if self.ref_paths:
+        # swap_face set = a gen-then-swap run: force a fresh RAG/LoRA
+        # generation (the loaded image / person is the face for the later
+        # Kontext pass, NOT an edit target or an IP-Adapter guide).
+        if self.ref_paths and not swap_face:
+            # a reference is a full override: the image supplies the art
+            # style, so the preset's style text (and LoRAs) are not applied
             full_prompt = prompt
         else:
             full_prompt = f"{prompt}, {style}" if style else prompt
-        editing = bool(self.ref_paths)
+        editing = bool(self.ref_paths) and not swap_face
         editor = self._editor_engine()
         model = self._model_raw()
         if editing:
@@ -4785,7 +5119,7 @@ class App:
                 return
 
         strength = round(self.lora_strength.get(), 2)
-        loras = [] if self.ref_paths else \
+        loras = [] if editing else \
             [(name, strength) for name in self._selected_loras()]
 
         # RAG map: retrieve the closest example images for this prompt and
@@ -4837,7 +5171,9 @@ class App:
         # Reference DB person, plain generation: the photo face-guides via
         # IP-Adapter. Not RAG — no retrieval, the picture is passed
         # straight through. Same engine rules as any image ref: SDXL only.
-        if self.actor_sel and not editing:
+        # Skipped in a gen-then-swap run: the identity comes from the crisp
+        # Kontext swap, so the base is drawn without an approximate face guide.
+        if self.actor_sel and not editing and not swap_face:
             if model_family(model) in ("flux", "schnell"):
                 self.status_var.set("Person photo needs an SDXL model "
                                     "(Juggernaut/DreamShaper) for plain "
@@ -4862,7 +5198,7 @@ class App:
 
         # Reference DB person, editing: the photo joins the loaded
         # reference images, exactly as if it had been loaded with 🖼 Load…
-        edit_refs = list(self.ref_paths)
+        edit_refs = [] if swap_face else list(self.ref_paths)
         if editing and self.actor_sel:
             ap = self._actor_ref_path()
             if ap and ap not in edit_refs:
@@ -4873,6 +5209,22 @@ class App:
                     self.status_var.set(
                         "Person photo left out — this editor takes at "
                         f"most {cap} images and they are already loaded.")
+
+        # auto-apply each ticked LoRA's activation keyword so the user never
+        # has to type it — read from the LoRA's own sidecar/metadata and added
+        # to the hidden full prompt (their typed prompt is untouched). The RAG
+        # map already prepends its own trigger, so the "already present" check
+        # keeps it from being doubled.
+        applied_kw = []
+        if not editing:
+            for lname, _s in loras:
+                trg = lora_trigger(lname)
+                if trg and trg.lower() not in full_prompt.lower():
+                    full_prompt = f"{full_prompt}, {trg}"
+                    applied_kw.append(trg)
+        if applied_kw:
+            self.status_var.set("Applied LoRA keyword(s): "
+                                + "; ".join(applied_kw))
 
         w, h = SIZE_PRESETS[self.size_var.get()]
         try:
@@ -4887,7 +5239,8 @@ class App:
         params = dict(prompt=full_prompt, user_prompt=prompt, style=style,
                       negative=self._get(self.negative_box),
                       model=model, loras=loras, width=w, height=h, seed=seed,
-                      steps=steps, cfg=None, batch=self.batch_var.get(),
+                      steps=steps, cfg=None,
+                      batch=1 if swap_face else self.batch_var.get(),
                       random_seed=self.random_seed_var.get(),
                       transparent=self.transparent_var.get(),
                       upscale=self.upscale_var.get(),
@@ -4895,7 +5248,7 @@ class App:
                       ref_images=edit_refs,
                       rag_ref_paths=rag_refs, rag_embed_paths=rag_embed_paths,
                       style_weight=rag_weight,
-                      editor=editor,
+                      editor=editor, swap_face=swap_face,
                       out_size=(w, h) if editing
                       and self.editor_canvas_var.get() else None,
                       denoise=round(self.change_var.get() / 100, 2))
@@ -5843,9 +6196,23 @@ class App:
             with open(dest, "wb") as fh:
                 for chunk in r.iter_content(1 << 20):
                     fh.write(chunk)
+            # save the trained words beside the file so the app can inject the
+            # activation keyword automatically when the LoRA is ticked
+            words = ver.get("trainedWords") or []
+            if isinstance(words, list) and words:
+                try:
+                    side = dest.with_suffix(".civitai.info")
+                    side.write_text(json.dumps({"trainedWords": words}),
+                                    encoding="utf-8")
+                except OSError:
+                    pass
+            _LORA_TRIGGER_CACHE.pop(fname, None)   # re-read on next use
+            kw = (", ".join(words[:4])) if words else ""
             out_var.set(f"Done — {fname}. Hit ↻ next to the model box to "
-                        f"see it in the LoRA lists.")
-            self.ui_queue.put(("status", f"LoRA installed: {fname}"))
+                        f"see it in the LoRA lists."
+                        + (f" Trigger: {kw}" if kw else ""))
+            self.ui_queue.put(("status", f"LoRA installed: {fname}"
+                               + (f" (auto-trigger: {kw})" if kw else "")))
         except Exception as e:
             out_var.set(f"Download failed: {e}")
 

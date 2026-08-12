@@ -331,20 +331,45 @@ photo BLOB is written to a temp JPEG at generation time and routed
   person's photo and the map's embeds **chain on one IP-Adapter** (§4,
   v1.19.0) instead of the person replacing the map.
 
-**One-click swap** (v1.19.0, extended v1.20.0; `_swap_person_in`, 🔀 Swap
-into selected) — puts a face into the selected history image via Flux
-**Kontext** with the canned `SWAP_PERSON_PROMPT` ("replace the person, keep
-pose / framing / costume / lighting / art style"), forcing `editor:kontext`
-and `ref_images = [target, face]` and keeping the target picture's size. It
-reuses `build_kontext_graph` (the same 2-image stitch the multi-ref editor
-uses) and, like all editing, bypasses presets/LoRAs/RAG — the styling is
-already baked into the picture being edited. **v1.20.0:** the face can be
-the Reference DB person OR a loaded editor image (`self.ref_paths[0]`); when
-both are present `_ask_swap_source` (a small modal) asks which. A loaded
-image used as the face is cleared on click (returns to plain-gen so
-LoRAs/RAG re-enable). Enabled by `_refresh_editor_state` when there's a
-target (history) AND a face (person or loaded image), and guards on the
-Kontext editor being installed/fitting.
+**One-click swap** (v1.19.0, extended v1.20.0 + v1.21.0; `_swap_person_in`,
+🔀) — puts a face into a picture via Flux **Kontext** with the canned
+`SWAP_PERSON_PROMPT` ("replace the person, keep pose / framing / costume /
+lighting / art style"). With a still selected in the gallery it runs as a
+direct edit: `editor:kontext`, `ref_images = [target, face]`, keeping the
+target picture's size, reusing `build_kontext_graph` (the same 2-image
+stitch the multi-ref editor uses) and, like all editing, bypassing
+presets/LoRAs/RAG — the styling is already baked into the picture being
+edited. **v1.20.0:** the face can be the Reference DB person OR a loaded
+editor image (`self.ref_paths[0]`); when both are present
+`_ask_swap_source` (a small modal) asks which. A loaded image used as the
+face is cleared on click (returns to plain-gen so LoRAs/RAG re-enable).
+**v1.21.0 — gen-then-swap:** with *nothing* selected, 🔀 calls
+`_generate(swap_face=face)` instead: a normal plain generation runs first
+with presets/LoRAs/RAG all active (`editing` is forced off, batch forced
+to 1, and the approximate IP-Adapter face guide is skipped — identity comes
+from the crisp Kontext pass), then `Generator._swap_face_pass` uploads the
+freshly drawn base + the face and runs one Kontext pass at the base's size
+(same pattern as the border center-clean second pass). Both the base and
+the swapped image are kept; any swap failure is swallowed with a status
+note so the base is never lost. The button therefore only needs a face —
+`_refresh_editor_state` enables it on `actor_sel or ref_paths` alone — and
+still guards on the Kontext editor being installed/fitting.
+
+**LoRA trigger auto-injection** (v1.21.0; `lora_trigger`,
+`_safetensors_metadata`) — each ticked LoRA's activation keyword(s) are
+appended to the hidden full prompt at generation (never to the user's typed
+text), looked up in order from: a `<name>.civitai.info` / `<name>.json`
+sidecar next to the file (`trainedWords` / `activation text` / `trigger`,
+capped at 4 words), the safetensors header's `__metadata__`
+(`modelspec.trigger_phrase`, `ss_trigger_words`), then `ss_output_name` as a
+last resort (alphabetic, ≤40 chars, no leading underscore). Results are
+cached per filename in `_LORA_TRIGGER_CACHE`; the CivitAI downloader writes
+a `trainedWords` sidecar beside every LoRA it fetches and ➕ Add LoRA file…
+copies an existing sidecar along — both pop the cache entry so the next use
+re-reads. A case-insensitive already-present check stops doubling (the RAG
+map prepends its own trigger before injection runs). Skipped entirely while
+editing (editors take no LoRAs). The safetensors reader parses only the
+8-byte length + JSON header — no torch, bounded at 20 MB.
 
 **Mode badges + tooltips** (v1.20.0) — two `ttk.Label` badges next to the
 VRAM meter (`lora_badge`/`rag_badge`, styles `BadgeOn.TLabel` green /
@@ -359,6 +384,10 @@ Hover help is the module-level `Tooltip` (a borderless `Toplevel` on
 `App._tip(widget, text)` attaches and retains them. The verbose IMAGE EDITOR
 header was trimmed to "(optional)" with the detail moved into its tooltip.
 The three primary Generate buttons share `Go.TButton` so they're one size.
+**v1.21.0** extended tooltip coverage from the editor to the entire left
+panel (prompt, negative, model, presets, LoRA controls, RAG map, canvas,
+steps/variations/seed, animator) plus the gallery and save/output buttons —
+every interactive control now explains itself on hover.
 
 This is **not RAG** — no retrieval; one explicitly chosen picture goes
 straight through. Ages are computed at display time, never stored. The ℹ
