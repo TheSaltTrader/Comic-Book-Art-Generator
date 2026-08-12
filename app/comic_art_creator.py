@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.21.0"
+APP_VERSION = "1.22.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -657,7 +657,16 @@ FLUX_CLIP_SRC = "flux1-dev-fp8.safetensors"   # donates CLIP+VAE to Kontext
 
 def build_kontext_graph(p):
     """Instruction edit via FLUX.1 Kontext: the loaded image(s) are the
-    context, the prompt says what to change."""
+    context, the prompt says what to change. Two multi-image modes:
+
+    - stitch (default): images are joined side-by-side into ONE canvas the
+      model sees as a single context image — right for "combine these"
+      edits, but layout-preserving: the output tends to keep the panels.
+    - chain (ref_mode="chain"): each image is scaled and encoded on its
+      own and chained through its own ReferenceLatent, so the model sees
+      N distinct context images. Required for cross-image instructions
+      like the face swap — a stitched reference just gets redrawn
+      side-by-side instead of swapped."""
     g = {}
     g["1"] = {"class_type": "UNETLoader",
               "inputs": {"unet_name": KONTEXT_FILE,
@@ -666,35 +675,58 @@ def build_kontext_graph(p):
               "inputs": {"ckpt_name": FLUX_CLIP_SRC}}
     g["4"] = {"class_type": "CLIPTextEncode",
               "inputs": {"text": p["prompt"], "clip": ["2", 1]}}
-    img_ref, nid, sid = None, 10, 20
-    for name in p["edit_image_names"][:4]:
-        g[str(nid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
-        if img_ref is None:
-            img_ref = [str(nid), 0]
-        else:
-            g[str(sid)] = {"class_type": "ImageStitch",
-                           "inputs": {"image1": img_ref,
-                                      "image2": [str(nid), 0],
-                                      "direction": "right",
-                                      "match_image_size": True,
-                                      "spacing_width": 0,
-                                      "spacing_color": "white"}}
-            img_ref = [str(sid), 0]
-            sid += 1
-        nid += 1
-    g["30"] = {"class_type": "FluxKontextImageScale",
-               "inputs": {"image": img_ref}}
-    g["31"] = {"class_type": "VAEEncode",
-               "inputs": {"pixels": ["30", 0], "vae": ["2", 2]}}
-    g["32"] = {"class_type": "ReferenceLatent",
-               "inputs": {"conditioning": ["4", 0], "latent": ["31", 0]}}
-    g["33"] = {"class_type": "FluxGuidance",
-               "inputs": {"conditioning": ["32", 0], "guidance": 2.5}}
+    if p.get("ref_mode") == "chain":
+        cond, first_lat, nid, sid = ["4", 0], None, 10, 20
+        for name in p["edit_image_names"][:4]:
+            g[str(nid)] = {"class_type": "LoadImage",
+                           "inputs": {"image": name}}
+            g[str(sid)] = {"class_type": "FluxKontextImageScale",
+                           "inputs": {"image": [str(nid), 0]}}
+            g[str(sid + 1)] = {"class_type": "VAEEncode",
+                               "inputs": {"pixels": [str(sid), 0],
+                                          "vae": ["2", 2]}}
+            g[str(sid + 2)] = {"class_type": "ReferenceLatent",
+                               "inputs": {"conditioning": cond,
+                                          "latent": [str(sid + 1), 0]}}
+            cond = [str(sid + 2), 0]
+            if first_lat is None:
+                first_lat = [str(sid + 1), 0]
+            nid += 1
+            sid += 3
+        g["33"] = {"class_type": "FluxGuidance",
+                   "inputs": {"conditioning": cond, "guidance": 2.5}}
+        latent_ref = first_lat
+    else:
+        img_ref, nid, sid = None, 10, 20
+        for name in p["edit_image_names"][:4]:
+            g[str(nid)] = {"class_type": "LoadImage",
+                           "inputs": {"image": name}}
+            if img_ref is None:
+                img_ref = [str(nid), 0]
+            else:
+                g[str(sid)] = {"class_type": "ImageStitch",
+                               "inputs": {"image1": img_ref,
+                                          "image2": [str(nid), 0],
+                                          "direction": "right",
+                                          "match_image_size": True,
+                                          "spacing_width": 0,
+                                          "spacing_color": "white"}}
+                img_ref = [str(sid), 0]
+                sid += 1
+            nid += 1
+        g["30"] = {"class_type": "FluxKontextImageScale",
+                   "inputs": {"image": img_ref}}
+        g["31"] = {"class_type": "VAEEncode",
+                   "inputs": {"pixels": ["30", 0], "vae": ["2", 2]}}
+        g["32"] = {"class_type": "ReferenceLatent",
+                   "inputs": {"conditioning": ["4", 0], "latent": ["31", 0]}}
+        g["33"] = {"class_type": "FluxGuidance",
+                   "inputs": {"conditioning": ["32", 0], "guidance": 2.5}}
+        latent_ref = ["31", 0]
     g["34"] = {"class_type": "ConditioningZeroOut",
                "inputs": {"conditioning": ["4", 0]}}
-    # by default the output canvas follows the reference; with out_size
-    # the reference only conditions and a fresh canvas sets the size
-    latent_ref = ["31", 0]
+    # by default the output canvas follows the (first) reference; with
+    # out_size the references only condition and a fresh canvas sets size
     if p.get("out_size"):
         ow, oh = p["out_size"]
         g["35"] = {"class_type": "EmptySD3LatentImage",
@@ -2048,7 +2080,8 @@ class Generator:
                     # with Flux Kontext and keep BOTH pictures
                     if params.get("swap_face") and not CANCEL.is_set():
                         swapped = self._swap_face_pass(ws, img,
-                                                       params["swap_face"])
+                                                       params["swap_face"],
+                                                       seed=p["seed"])
                         if swapped is not None:
                             sp = dict(p)
                             sp.pop("swap_face", None)
@@ -2060,10 +2093,12 @@ class Generator:
         finally:
             ws.close()
 
-    def _swap_face_pass(self, ws, base_img, face_path):
+    def _swap_face_pass(self, ws, base_img, face_path, seed=0):
         """Second pass of a gen-then-swap: put a face into the freshly drawn
-        base image with Flux Kontext. Returns the swapped image, or None on
-        any failure (the base image is always kept regardless)."""
+        base image with Flux Kontext. Chained references (ref_mode) — a
+        stitched pair just gets redrawn side-by-side instead of swapped.
+        Returns the swapped image, or None on any failure (the base image
+        is always kept regardless)."""
         if CANCEL.is_set():
             return None
         try:
@@ -2073,8 +2108,9 @@ class Generator:
             face_name = self._upload_ref(face_path)
             cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
                       edit_image_names=[base_name, face_name],
+                      ref_mode="chain",
                       out_size=(base_img.width, base_img.height),
-                      seed=0, steps=None)
+                      seed=seed, steps=None)
             graph = build_kontext_graph(cp)
             r = requests.post(f"{ENGINE_URL}/prompt",
                               json={"prompt": graph,
@@ -2381,6 +2417,12 @@ class App:
         s.configure("Danger.TButton", background="#c0392b",
                     foreground="white", padding=6)
         s.map("Danger.TButton", background=[("active", "#e74c3c")])
+        # the face-swap button: red like Danger but a size up, so the
+        # 🔀 icon reads at a glance
+        s.configure("Swap.TButton", background="#c0392b", foreground="white",
+                    font=("Segoe UI", 11, "bold"), padding=8)
+        s.map("Swap.TButton", background=[("active", "#e74c3c"),
+                                          ("disabled", BG3)])
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
         s.configure("TRadiobutton", background=BG, foreground=FG)
@@ -2850,7 +2892,8 @@ class App:
         r += 1
         srow.columnconfigure(1, weight=1)
         self.swap_btn = ttk.Button(srow, text="🔀 Swap into selected",
-                                   width=20, command=self._swap_person_in)
+                                   width=20, style="Swap.TButton",
+                                   command=self._swap_person_in)
         self.swap_btn.grid(row=0, column=0)
         self.swap_btn.state(["disabled"])   # until a target + a face exist
         self._tip(self.swap_btn,
@@ -2861,7 +2904,9 @@ class App:
                   "picture. With nothing selected, it first generates a base "
                   "image from your prompt + preset + LoRAs + RAG, then swaps "
                   "the face into it — keeping both. LoRAs/RAG apply to the base "
-                  "generation, never to the swap itself.")
+                  "generation, never to the swap itself. Honors Variations: "
+                  "N variations = N base+swap sets (or N swap attempts on a "
+                  "selected picture).")
         ttk.Label(srow, text="generate + swap a face in (or swap into the "
                              "selected picture)",
                   style="Dim.TLabel", wraplength=230).grid(
@@ -4930,10 +4975,15 @@ class App:
         Reference DB person OR a loaded image (asked if both). Context-aware:
 
         • a still is selected in the gallery -> swap the face straight into
-          that picture (one Kontext pass, no generation);
-        • nothing is selected -> two parts: generate a base image from the
-          prompt + preset + LoRAs + RAG, then swap the face into it. Both the
-          base and the swapped result are kept.
+          that picture (no generation); Variations = that many
+          differently-seeded swap attempts;
+        • nothing is selected -> generate a base image from the prompt +
+          preset + LoRAs + RAG, then swap the face into it — keeping both.
+          Variations = that many base+swap sets.
+
+        Both paths use chained Kontext references (ref_mode="chain"): each
+        image is its own ReferenceLatent, so the model actually transfers
+        the face instead of redrawing the two images side by side.
         """
         if self._busy_guard():
             return
@@ -4987,13 +5037,24 @@ class App:
                 iw, ih = target_img.size
             except Exception:
                 iw, ih = SIZE_PRESETS[self.size_var.get()]
+            # Variations applies here too: N differently-seeded swap
+            # attempts on the same target, pick the best
+            try:
+                seed = int(self.seed_var.get())
+            except ValueError:
+                seed = 0
+            if self.random_seed_var.get():
+                seed = random.randrange(2**32)
+                self.seed_var.set(str(seed))
             params = dict(
                 prompt=SWAP_PERSON_PROMPT, user_prompt="face-swapped",
                 style="", negative="", model="editor:kontext",
-                loras=[], width=iw, height=ih, seed=0, steps=None, cfg=None,
-                batch=1, random_seed=False, transparent=False, upscale=False,
+                loras=[], width=iw, height=ih, seed=seed, steps=None,
+                cfg=None, batch=self.batch_var.get(),
+                random_seed=self.random_seed_var.get(),
+                transparent=False, upscale=False,
                 preset=self.preset_var.get(),
-                ref_images=[target_path, face],
+                ref_images=[target_path, face], ref_mode="chain",
                 rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
                 editor="kontext",
                 out_size=(iw, ih) if self.editor_canvas_var.get() else None,
@@ -5239,8 +5300,7 @@ class App:
         params = dict(prompt=full_prompt, user_prompt=prompt, style=style,
                       negative=self._get(self.negative_box),
                       model=model, loras=loras, width=w, height=h, seed=seed,
-                      steps=steps, cfg=None,
-                      batch=1 if swap_face else self.batch_var.get(),
+                      steps=steps, cfg=None, batch=self.batch_var.get(),
                       random_seed=self.random_seed_var.get(),
                       transparent=self.transparent_var.get(),
                       upscale=self.upscale_var.get(),

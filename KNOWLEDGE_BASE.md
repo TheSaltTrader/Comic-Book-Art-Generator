@@ -183,7 +183,17 @@ Editors:
 - **Flux Kontext** (`flux1-dev-kontext_fp8`, 11 GB) uses the ordinary
   `flux1-dev-fp8` checkpoint as a **CLIP and VAE donor**, which saves
   downloading T5 and the autoencoder separately. `ReferenceLatent` +
-  `FluxGuidance` 2.5, cfg 1. Multi-image via `ImageStitch`.
+  `FluxGuidance` 2.5, cfg 1. Multi-image two ways (`build_kontext_graph`):
+  the default **stitches** the images side-by-side into one context image
+  (right for "combine these" edits), while `ref_mode="chain"` gives each
+  image its own `FluxKontextImageScale` → `VAEEncode` → `ReferenceLatent`
+  chained on the conditioning, so the model sees N distinct context
+  images. **Lesson (v1.22.0, found by a live user run)**: cross-image
+  instructions like "replace the person in image 1 with the person from
+  image 2" DO NOT work on a stitched reference — the model redraws the
+  stitched canvas (or ignores the instruction) instead of transferring;
+  the chained mode transfers correctly (live-validated A/B at the same
+  seed). Stitch = compose, chain = refer.
 - **Qwen Image Edit** needs `ImageScaleToTotalPixels` with
   `resolution_steps: 1` on ComfyUI 0.30+, and `CLIPLoader type
   qwen_image`.
@@ -335,25 +345,33 @@ photo BLOB is written to a temp JPEG at generation time and routed
 🔀) — puts a face into a picture via Flux **Kontext** with the canned
 `SWAP_PERSON_PROMPT` ("replace the person, keep pose / framing / costume /
 lighting / art style"). With a still selected in the gallery it runs as a
-direct edit: `editor:kontext`, `ref_images = [target, face]`, keeping the
-target picture's size, reusing `build_kontext_graph` (the same 2-image
-stitch the multi-ref editor uses) and, like all editing, bypassing
-presets/LoRAs/RAG — the styling is already baked into the picture being
-edited. **v1.20.0:** the face can be the Reference DB person OR a loaded
+direct edit: `editor:kontext`, `ref_images = [target, face]`,
+`ref_mode="chain"` (see §4 — a stitched pair does NOT swap), keeping the
+target picture's size and, like all editing, bypassing presets/LoRAs/RAG —
+the styling is already baked into the picture being edited. **v1.20.0:** the face can be the Reference DB person OR a loaded
 editor image (`self.ref_paths[0]`); when both are present
 `_ask_swap_source` (a small modal) asks which. A loaded image used as the
 face is cleared on click (returns to plain-gen so LoRAs/RAG re-enable).
 **v1.21.0 — gen-then-swap:** with *nothing* selected, 🔀 calls
 `_generate(swap_face=face)` instead: a normal plain generation runs first
-with presets/LoRAs/RAG all active (`editing` is forced off, batch forced
-to 1, and the approximate IP-Adapter face guide is skipped — identity comes
-from the crisp Kontext pass), then `Generator._swap_face_pass` uploads the
-freshly drawn base + the face and runs one Kontext pass at the base's size
+with presets/LoRAs/RAG all active (`editing` is forced off and the
+approximate IP-Adapter face guide is skipped — identity comes from the
+crisp Kontext pass), then `Generator._swap_face_pass` uploads the freshly
+drawn base + the face and runs one chained Kontext pass at the base's size
 (same pattern as the border center-clean second pass). Both the base and
 the swapped image are kept; any swap failure is swallowed with a status
 note so the base is never lost. The button therefore only needs a face —
 `_refresh_editor_state` enables it on `actor_sel or ref_paths` alone — and
 still guards on the Kontext editor being installed/fitting.
+**v1.22.0:** both swap paths switched from stitched to **chained**
+references after a user run showed the stitched pair being redrawn
+side-by-side instead of swapped (§4 lesson; fix live-validated A/B).
+**Variations applies to swaps**: gen-then-swap makes N base+swap sets
+(the Kontext pass inherits each variation's seed), a direct swap makes N
+differently-seeded attempts on the same target — both via the ordinary
+client-side batch loop, and the direct path now follows the main seed
+rules (Random / fixed). The button wears `Swap.TButton` — Danger red,
+one font size up — so the swap action reads at a glance.
 
 **LoRA trigger auto-injection** (v1.21.0; `lora_trigger`,
 `_safetensors_metadata`) — each ticked LoRA's activation keyword(s) are

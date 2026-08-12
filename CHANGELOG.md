@@ -1,5 +1,19 @@
 # Changelog — Comic Book Art Creator
 
+## v1.22.0 — 2026-08-12
+- **Face swap actually swaps now.** The Kontext swap was sending the two
+  pictures stitched side-by-side, and the model redrew them side-by-side
+  (or ignored the face) instead of transferring it. Both swap paths now
+  feed the base picture and the face as two separate chained references,
+  and the face really lands on the person — verified live against the old
+  behavior on the same seed.
+- **Variations applies to swaps.** Set Variations to N and 🔀 makes N
+  complete base+swap sets (nothing selected) or N differently-seeded swap
+  attempts on the selected picture — keep the best. The direct swap also
+  honors your Random/fixed seed choice now.
+- **The 🔀 Swap button is red and bigger**, so the one-click action stands
+  out from the row of utility buttons around it.
+
 ## v1.21.0 — 2026-08-12
 - **Generate + swap in one click.** 🔀 no longer needs a picture selected in
   the gallery: with nothing selected it first generates a base image from

@@ -140,6 +140,8 @@ the pose, framing, costume, lighting and art style:
 
 The face can also be any **loaded image** instead of a DB person — load a
 face with 🖼 Load…, and 🔀 asks which source to use if both are set. The
+**Variations** setting applies to swaps too: N variations = N base+swap
+sets, or N differently-seeded swap attempts on a selected picture. The
 ℹ button next to the Reference DB row explains exactly what applies in
 each mode.
 
