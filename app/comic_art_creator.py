@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.24.0"
+APP_VERSION = "1.24.1"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1424,15 +1424,19 @@ BORDER_CLEAN_PROMPT = (
 # Image-swap step 2: image 1 is the generated art, image 2 is the person's
 # photo. Kontext keeps the scene and restyles the face to match, so a
 # LoRA/RAG-built body becomes that specific person without touching the art.
+# IMPORTANT: never name concrete traits (beard/glasses/etc.) in these
+# prompts — with weak image grounding the words themselves leak into the
+# picture (a woman's face came back as a bearded man because the prompt
+# said "beard"). Only generic wording that defers entirely to the photo.
 SWAP_PERSON_PROMPT = (
     "Replace the head and face of the person in the first image with the "
     "head and face of the person from the second image, so the character "
-    "is unmistakably that person: copy their facial structure, eyes, nose, "
-    "mouth, skin tone, hair color and hairstyle, and any beard, freckles "
-    "or marks. Keep everything else from the first image exactly as it "
-    "is — pose, body, clothing, framing, background, lighting, colors and "
-    "art style. Render the new face in the first image's art style, not "
-    "as a photograph.")
+    "is unmistakably that person — the same face and the same hair, "
+    "matching every visible feature of the person in the second image "
+    "exactly, adding nothing that person does not have. Keep everything "
+    "else from the first image exactly as it is — pose, body, clothing, "
+    "framing, background, lighting, colors and art style. Render the new "
+    "face in the first image's art style, not as a photograph.")
 # swaps follow the instruction better with guidance above the editing
 # default 2.5; too high drifts the style
 SWAP_GUIDANCE = 3.0
@@ -1440,15 +1444,20 @@ SWAP_GUIDANCE = 3.0
 # identity far more reliably than Kontext's chained references — it is the
 # preferred swap engine whenever its models are installed (live A/B 2026-08:
 # Qwen 2/2 pairs, Kontext base-first 0/2, face-first 1/2).
+# enumerate ABSTRACT attributes only (structure/tone/color/length/gender)
+# — attribute names steer the transfer without being drawable objects, so
+# nothing can leak into the picture the way entity nouns did
 QWEN_SWAP_PROMPT = (
     "Replace the head and face of the person in image 1 with the head and "
     "face of the person from image 2, so the character in image 1 is "
     "unmistakably the person from image 2: copy their facial structure, "
-    "eyes, skin tone, hair color and hairstyle, and their beard, glasses "
-    "or marks only if the person in image 2 actually has them. Keep "
-    "everything else in image 1 exactly unchanged — pose, body, clothing, "
-    "framing, background, lighting, colors and art style. Render the new "
-    "face in image 1's art style, not as a photograph.")
+    "their eyes, their skin tone, and their hair color, hair length and "
+    "hairstyle exactly as they appear in image 2, adding nothing that "
+    "person does not have. The character's gender and age must match the "
+    "person in image 2. Keep everything else in image 1 exactly "
+    "unchanged — pose, body, clothing, framing, background, lighting, "
+    "colors and art style. Render the new face in image 1's art style, "
+    "not as a photograph.")
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -2135,7 +2144,19 @@ class Generator:
             return None
         try:
             label = "Qwen" if editor == "qwen" else "Flux Kontext"
-            self.q.put(("status", f"Swapping the face in ({label})…"))
+            self.q.put(("status", f"Swapping the face in ({label}) — the "
+                                  "first swap can take minutes while the "
+                                  "model loads…"))
+            # give the swap model a clean card once per run: the base
+            # model can stay resident and make a 19-28 GB load thrash
+            # into the engine-stopped-responding timeout
+            if not getattr(self, "_swap_freed", False):
+                self._swap_freed = True
+                try:
+                    requests.post(f"{ENGINE_URL}/free",
+                                  json={"unload_models": True}, timeout=10)
+                except Exception:
+                    pass
             size = tuple(out_size) if out_size \
                 else (base_img.width, base_img.height)
             up = base_img.convert("RGB")
@@ -2159,7 +2180,10 @@ class Generator:
                                     "client_id": self.client_id},
                               timeout=30)
             r.raise_for_status()
-            out = self._await_images(ws, r.json()["prompt_id"])
+            # a first-time 19-28 GB model load off a hard disk plus the
+            # render can far exceed the default 600s
+            out = self._await_images(ws, r.json()["prompt_id"],
+                                     timeout=1800)
             if out:
                 return self._fetch_image(out[0])
         except Exception as e:
@@ -5056,9 +5080,33 @@ class App:
                     "with 🖼 Load… or pick a 👤 Person. Generating "
                     "normally.")
             else:
-                if not self._editor_missing("qwen") \
-                        and self._editor_tier("qwen") != "block":
+                qwen_fits = self._editor_tier("qwen") != "block"
+                qwen_missing = self._editor_missing("qwen")
+                if qwen_fits and not qwen_missing:
                     swap_editor = "qwen"
+                elif qwen_fits and \
+                        not self.settings.get("qwen_swap_declined"):
+                    # one-time offer — Qwen is far more reliable at
+                    # landing the face than the Kontext fallback
+                    if messagebox.askyesno(
+                            "Better face swaps",
+                            "Face swaps are much more reliable with the "
+                            "Qwen editor (~28 GB, one-time download)."
+                            "\n\nInstall it now? Choosing No uses Flux "
+                            "Kontext for swaps from here on — it keeps "
+                            "the scene, but the face may need a few "
+                            "Variations to land."):
+                        threading.Thread(
+                            target=self._install_editor,
+                            args=("qwen", qwen_missing, "progress"),
+                            daemon=True).start()
+                        self.status_var.set(
+                            "Downloading the Qwen editor — watch the "
+                            "progress bar and Generate again when it "
+                            "says done.")
+                        return
+                    self.settings["qwen_swap_declined"] = True
+                    self._persist()
                 if not self._ensure_editor_ready(swap_editor):
                     return
         # swap_face set = a gen-then-swap run: force a fresh RAG/LoRA

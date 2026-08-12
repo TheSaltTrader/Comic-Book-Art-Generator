@@ -378,10 +378,27 @@ the Qwen files are installed and `_editor_tier("qwen") != "block"`
 scene; identity may not always land) otherwise; `_ensure_editor_ready`
 runs on whichever was picked. `Generator._swap_face_pass(editor=…)`
 builds `build_qwen_edit_graph` with `QWEN_SWAP_PROMPT` ("image 1 / image
-2" wording; conditional "beard, glasses or marks only if the person in
-image 2 actually has them" — an unconditional list made Qwen hallucinate
-glasses) or the Kontext chain as before. Same out_size/seed plumbing in
-both.
+2" wording) or the Kontext chain as before. Same out_size/seed plumbing
+in both.
+
+**Prompt-token leakage (v1.24.1 lesson — cost a user a bearded man on a
+woman's face)**: NEVER name concrete traits in a swap prompt. "Copy
+their … beard, glasses …" reads as an example list to a human, but with
+weak image grounding the WORDS instantiate — an unconditional list made
+Qwen hallucinate glasses, and even a conditional one ("only if the
+person actually has them") produced a bearded man from a female
+reference. Both swap prompts are now trait-neutral ("the same face and
+the same hair, matching every visible feature … adding nothing that
+person does not have"), and the regression suite asserts no leakable
+nouns ever return. **Swap robustness plumbing (v1.24.1)**: the swap's
+`_await_images` timeout is 1800s (a first-time 19–28 GB model load off a
+hard disk plus the render can far exceed the 600s default — users saw
+"the engine stopped responding"), and `_swap_face_pass` POSTs `/free
+{"unload_models": true}` once per run before the first swap so the base
+checkpoint isn't squatting VRAM while the swap model loads. If the swap
+box is ticked and Qwen is absent but fits, `_generate` makes a ONE-TIME
+install offer (declining sets settings key `qwen_swap_declined` and
+quietly uses Kontext thereafter).
 
 **LoRA trigger auto-injection** (v1.21.0; `lora_trigger`,
 `_safetensors_metadata`) — each ticked LoRA's activation keyword(s) are

@@ -1,5 +1,22 @@
 # Changelog — Comic Book Art Creator
 
+## v1.24.1 — 2026-08-12
+- **Wrong-face fix (the "bearded man" bug).** The swap instructions
+  mentioned concrete traits ("beard, glasses…") as examples of what to
+  copy — and with some inputs the words themselves leaked into the
+  picture, turning a woman's face into a bearded man. Both swap prompts
+  are now trait-neutral: they defer entirely to the reference photo and
+  explicitly add nothing the person doesn't have.
+- **"Engine stopped responding" during the swap fixed.** The swap now
+  waits up to 30 minutes instead of 10 (a first-time 19–28 GB swap-model
+  load from disk could blow the old limit), and it unloads the base
+  model from VRAM before the swap engine loads, so the two no longer
+  fight for memory mid-run.
+- **One-time Qwen offer.** If the Qwen editor isn't installed when you
+  tick the swap box, the app now offers the one-time ~28 GB download —
+  it's much more reliable at landing the face than the Kontext fallback.
+  Decline and it won't ask again (Kontext is used quietly).
+
 ## v1.24.0 — 2026-08-12
 - **Face swap is now a checkbox, not a button.** 🔀 **Use RAG & LoRA for
   image swap** (in the image-editor section) replaces the "Swap into
