@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.23.0"
+APP_VERSION = "1.24.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1421,8 +1421,8 @@ BORDER_CLEAN_PROMPT = (
     "creatures, no objects, no scenery and no text in the middle. Keep "
     "the decorative border frame around the edges exactly as it is, "
     "unchanged. Only empty out the center.")
-# One-click "Swap into selected": image 1 is the generated art, image 2 is the
-# person's photo. Kontext keeps the scene and restyles the face to match, so a
+# Image-swap step 2: image 1 is the generated art, image 2 is the person's
+# photo. Kontext keeps the scene and restyles the face to match, so a
 # LoRA/RAG-built body becomes that specific person without touching the art.
 SWAP_PERSON_PROMPT = (
     "Replace the head and face of the person in the first image with the "
@@ -1436,6 +1436,19 @@ SWAP_PERSON_PROMPT = (
 # swaps follow the instruction better with guidance above the editing
 # default 2.5; too high drifts the style
 SWAP_GUIDANCE = 3.0
+# Qwen Image Edit is natively multi-image (image1/image2) and transfers
+# identity far more reliably than Kontext's chained references — it is the
+# preferred swap engine whenever its models are installed (live A/B 2026-08:
+# Qwen 2/2 pairs, Kontext base-first 0/2, face-first 1/2).
+QWEN_SWAP_PROMPT = (
+    "Replace the head and face of the person in image 1 with the head and "
+    "face of the person from image 2, so the character in image 1 is "
+    "unmistakably the person from image 2: copy their facial structure, "
+    "eyes, skin tone, hair color and hairstyle, and their beard, glasses "
+    "or marks only if the person in image 2 actually has them. Keep "
+    "everything else in image 1 exactly unchanged — pose, body, clothing, "
+    "framing, background, lighting, colors and art style. Render the new "
+    "face in image 1's art style, not as a photograph.")
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -1665,7 +1678,9 @@ def lora_trigger(name):
         stem = path.with_suffix("")
         for side in (Path(str(stem) + ".civitai.info"),
                      stem.with_suffix(".json")):
-            if side.exists():
+            # bounded read: a sidecar is a few KB of JSON — refuse to
+            # slurp anything unreasonable into memory
+            if side.exists() and side.stat().st_size <= 5_000_000:
                 try:
                     j = json.loads(side.read_text(encoding="utf-8",
                                                   errors="replace"))
@@ -1692,6 +1707,9 @@ def lora_trigger(name):
                     trig = on.strip()
     except Exception:
         trig = ""
+    # cap what a file can inject into the prompt (a metadata header may
+    # legally be megabytes — its trigger phrase must not be)
+    trig = trig.strip()[:200]
     _LORA_TRIGGER_CACHE[name] = trig
     return trig
 
@@ -2090,7 +2108,8 @@ class Generator:
                         # swap at CANVAS size — the base may be 4x-upscaled
                         swapped = self._swap_face_pass(
                             ws, img, params["swap_face"], seed=p["seed"],
-                            out_size=(p["width"], p["height"]))
+                            out_size=(p["width"], p["height"]),
+                            editor=params.get("swap_editor") or "kontext")
                         if swapped is not None:
                             sp = dict(p)
                             sp.pop("swap_face", None)
@@ -2102,18 +2121,21 @@ class Generator:
         finally:
             ws.close()
 
-    def _swap_face_pass(self, ws, base_img, face_path, seed=0, out_size=None):
+    def _swap_face_pass(self, ws, base_img, face_path, seed=0, out_size=None,
+                        editor="kontext"):
         """Second pass of a gen-then-swap: put a face into the freshly drawn
-        base image with Flux Kontext. Chained references (ref_mode) — a
-        stitched pair just gets redrawn side-by-side instead of swapped.
-        out_size = the canvas size; a 4x-upscaled base is brought back down
-        so the swap always lands at canvas dimensions. Returns the swapped
-        image, or None on any failure (the base image is always kept
-        regardless)."""
+        base image. editor="qwen" (preferred when installed) is natively
+        multi-image and transfers identity reliably; "kontext" falls back
+        to chained references (a stitched pair just gets redrawn
+        side-by-side instead of swapped). out_size = the canvas size; a
+        4x-upscaled base is brought back down so the swap always lands at
+        canvas dimensions. Returns the swapped image, or None on any
+        failure (the base image is always kept regardless)."""
         if CANCEL.is_set():
             return None
         try:
-            self.q.put(("status", "Swapping the face in (Flux Kontext)…"))
+            label = "Qwen" if editor == "qwen" else "Flux Kontext"
+            self.q.put(("status", f"Swapping the face in ({label})…"))
             size = tuple(out_size) if out_size \
                 else (base_img.width, base_img.height)
             up = base_img.convert("RGB")
@@ -2121,11 +2143,17 @@ class Generator:
                 up = up.resize(size, Image.LANCZOS)
             base_name = self._upload_pil(up, "cbac_swap_base.png")
             face_name = self._upload_ref(face_path)
-            cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
-                      edit_image_names=[base_name, face_name],
-                      ref_mode="chain", guidance=SWAP_GUIDANCE,
-                      out_size=size, seed=seed, steps=None)
-            graph = build_kontext_graph(cp)
+            if editor == "qwen":
+                cp = dict(prompt=QWEN_SWAP_PROMPT, editor="qwen",
+                          edit_image_names=[base_name, face_name],
+                          out_size=size, seed=seed, steps=None)
+                graph = build_qwen_edit_graph(cp)
+            else:
+                cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
+                          edit_image_names=[base_name, face_name],
+                          ref_mode="chain", guidance=SWAP_GUIDANCE,
+                          out_size=size, seed=seed, steps=None)
+                graph = build_kontext_graph(cp)
             r = requests.post(f"{ENGINE_URL}/prompt",
                               json={"prompt": graph,
                                     "client_id": self.client_id},
@@ -2431,12 +2459,6 @@ class App:
         s.configure("Danger.TButton", background="#c0392b",
                     foreground="white", padding=6)
         s.map("Danger.TButton", background=[("active", "#e74c3c")])
-        # the face-swap button: red like Danger but a size up, so the
-        # 🔀 icon reads at a glance
-        s.configure("Swap.TButton", background="#c0392b", foreground="white",
-                    font=("Segoe UI", 11, "bold"), padding=8)
-        s.map("Swap.TButton", background=[("active", "#e74c3c"),
-                                          ("disabled", BG3)])
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
         s.configure("TRadiobutton", background=BG, foreground=FG)
@@ -2839,7 +2861,8 @@ class App:
         load_btn.grid(row=0, column=0)
         self._tip(load_btn,
                   "Load image file(s) to edit with your prompt. A loaded image "
-                  "can also be the face for 🔀 Swap into selected.")
+                  "can also be the face for the 🔀 image-swap checkbox "
+                  "below.")
         self.ref_var = StringVar(value="none — text only")
         ttk.Label(rrow, textvariable=self.ref_var, style="Dim.TLabel",
                   wraplength=160).grid(row=0, column=1, sticky=W, padx=6)
@@ -2890,7 +2913,8 @@ class App:
                   "Pick a person from the loaded database. Their photo guides "
                   "the face in plain SDXL generation (with your LoRAs and RAG "
                   "still on), joins the editor when editing, or is the face "
-                  "for 🔀 Swap into selected.")
+                  "for the 🔀 image-swap checkbox (when no image is "
+                  "loaded).")
         self.actor_var = StringVar(value="no person selected")
         ttk.Label(prow, textvariable=self.actor_var, style="Dim.TLabel",
                   wraplength=150).grid(row=0, column=1, sticky=W, padx=6)
@@ -2904,27 +2928,21 @@ class App:
                   "person-only edit (enters edit mode).")
         srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
-        srow.columnconfigure(1, weight=1)
-        self.swap_btn = ttk.Button(srow, text="🔀 Swap into selected",
-                                   width=20, style="Swap.TButton",
-                                   command=self._swap_person_in)
-        self.swap_btn.grid(row=0, column=0)
-        self.swap_btn.state(["disabled"])   # until a target + a face exist
-        self._tip(self.swap_btn,
-                  "Put a face into a picture with Flux Kontext, keeping the "
-                  "pose, framing, costume, lighting and art style. The face is "
-                  "the Reference DB person or a loaded image (asked if both). "
-                  "With a gallery picture selected, it swaps straight into that "
-                  "picture. With nothing selected, it first generates a base "
-                  "image from your prompt + preset + LoRAs + RAG, then swaps "
-                  "the face into it — keeping both. LoRAs/RAG apply to the base "
-                  "generation, never to the swap itself. Honors Variations: "
-                  "N variations = N base+swap sets (or N swap attempts on a "
-                  "selected picture).")
-        ttk.Label(srow, text="generate + swap a face in (or swap into the "
-                             "selected picture)",
-                  style="Dim.TLabel", wraplength=230).grid(
-            row=0, column=1, sticky=W, padx=6)
+        self.swap_rag_var = BooleanVar(value=False)
+        self.swap_cb = ttk.Checkbutton(
+            srow, text="🔀 Use RAG & LoRA for image swap",
+            variable=self.swap_rag_var,
+            command=self._refresh_editor_state)
+        self.swap_cb.grid(row=0, column=0, sticky=W)
+        self._tip(self.swap_cb,
+                  "Two-step generation. Step 1: your prompt + preset + LoRAs "
+                  "+ RAG map generate the styled picture as usual. Step 2: "
+                  "the face from your loaded image (🖼 Load…, or the 👤 "
+                  "Person if nothing is loaded) is applied to the person in "
+                  "it — via Qwen Image Edit when installed (most reliable), "
+                  "else Flux Kontext. Both pictures are kept. While this "
+                  "is ticked, a loaded image is the FACE — not an edit "
+                  "target. Honors Variations: N = N base+swap pairs.")
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         erow.columnconfigure(1, weight=1)
         ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
@@ -3565,18 +3583,21 @@ class App:
             "    on one IP-Adapter instead of the person replacing the map.\n"
             "  • Ticked LoRAs' trigger words are added to the prompt\n"
             "    automatically (read from the LoRA's own metadata/sidecar)\n\n"
-            "IMAGE EDITING (editor image(s) loaded, or ➡ To editor):\n"
+            "IMAGE EDITING (editor image(s) loaded, swap box UNTICKED):\n"
             "  • Your prompt becomes the edit instruction\n"
             "  • Style preset, LoRAs and RAG map — NOT applied\n"
             "    (the Kontext/Qwen editors don't use them)\n"
             "  • Reference DB person — the photo is handed to the editor\n"
-            "    as context, so it can draw that person into the result\n"
-            "  • 🔀 Swap into selected — one click sends the selected image\n"
-            "    plus the chosen face to Kontext with a ready-made\n"
-            "    'replace the person, keep everything else' instruction.\n"
-            "    With NO picture selected it generates a base image first\n"
-            "    (preset + LoRAs + RAG all on), then swaps the face into\n"
-            "    it — both pictures are kept\n\n"
+            "    as context, so it can draw that person into the result\n\n"
+            "🔀 USE RAG & LoRA FOR IMAGE SWAP (ticked):\n"
+            "  • Generate runs TWO steps: your prompt + preset + LoRAs +\n"
+            "    RAG map draw the styled picture as usual, then the face\n"
+            "    from your loaded image (or the 👤 Person if nothing is\n"
+            "    loaded) is applied to it with Flux Kontext\n"
+            "  • Both pictures land in the gallery — the styled base and\n"
+            "    the face-swapped one\n"
+            "  • While ticked, a loaded image is the FACE, not an edit\n"
+            "    target\n\n"
             "Tip: for LoRA-styled fresh art guided by a face, select the "
             "person and generate WITHOUT editor images on an SDXL model. "
             "To restyle or stage the person directly, use ➡ To editor and "
@@ -4174,6 +4195,7 @@ class App:
             "ollama_model": self.ollama_var.get(),
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
+            "swap_rag": self.swap_rag_var.get(),
             "auto_negative": self._auto_negative,
         }
 
@@ -4254,6 +4276,7 @@ class App:
             self.batch_var.set(st.get("batch", 1))
             self.transparent_var.set(st.get("transparent", False))
             self.upscale_var.set(st.get("upscale", False))
+            self.swap_rag_var.set(st.get("swap_rag", False))
             # the probe runs in the background, so remember the wanted
             # model and select it once the list arrives
             self._want_ollama_model = st.get("ollama_model", "") or ""
@@ -4307,7 +4330,8 @@ class App:
                     self.anim_size_var, self.anim_transparent_var,
                     self.anim_motion_var, self.anim_gif_var,
                     self.anim_zip_var, self.anim_sheet_var,
-                    self.anim_video_var, self.ollama_var):
+                    self.anim_video_var, self.ollama_var,
+                    self.swap_rag_var):
             var.trace_add("write", self._schedule_persist)
         for box in (self.prompt_box, self.negative_box, self.style_box,
                     self.border_prompt_box, self.anim_prompt_box):
@@ -4951,148 +4975,14 @@ class App:
         self._refresh_editor_state()
         self._schedule_persist()
 
-    def _ask_swap_source(self):
-        """Both a Reference DB person and a loaded image can be the face to
-        swap in — ask which. Returns 'db', 'loaded', or None if cancelled."""
-        dlg = Toplevel(self.root)
-        dlg.title("Swap which face in?")
-        dlg.configure(bg=BG)
-        dlg.transient(self.root)
-        dlg.resizable(False, False)
-        ttk.Label(dlg, text="Put which face into the selected picture?",
-                  style="Head.TLabel").pack(padx=18, pady=(16, 12))
-        choice = {"v": None}
-
-        def pick(v):
-            choice["v"] = v
-            dlg.destroy()
-
-        brow = ttk.Frame(dlg)
-        brow.pack(padx=18, pady=(0, 16))
-        ttk.Button(brow, text="👤 Reference DB person", width=22,
-                   command=lambda: pick("db")).pack(side="left", padx=6)
-        ttk.Button(brow, text="🖼 Loaded image", width=18,
-                   command=lambda: pick("loaded")).pack(side="left", padx=6)
-        dlg.update_idletasks()
-        x = self.root.winfo_rootx() + \
-            (self.root.winfo_width() - dlg.winfo_width()) // 2
-        y = self.root.winfo_rooty() + \
-            (self.root.winfo_height() - dlg.winfo_height()) // 3
-        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
-        dlg.grab_set()
-        self.root.wait_window(dlg)
-        return choice["v"]
-
-    def _swap_person_in(self):
-        """Put a face into a picture with Flux Kontext, keeping the pose,
-        framing, costume, lighting and art style. The face is the selected
-        Reference DB person OR a loaded image (asked if both). Context-aware:
-
-        • a still is selected in the gallery -> swap the face straight into
-          that picture (no generation); Variations = that many
-          differently-seeded swap attempts;
-        • nothing is selected -> generate a base image from the prompt +
-          preset + LoRAs + RAG, then swap the face into it — keeping both.
-          Variations = that many base+swap sets.
-
-        Both paths use chained Kontext references (ref_mode="chain"): each
-        image is its own ReferenceLatent, so the model actually transfers
-        the face instead of redrawing the two images side by side.
-        """
-        if self._busy_guard():
-            return
-        if not engine_alive():
-            messagebox.showerror("Engine", "Engine is not running yet.")
-            return
-
-        # the face to put in: the DB person, a loaded image, or (if both) ask
-        person = self._actor_ref_path()             # DB person photo or None
-        loaded = self.ref_paths[0] if self.ref_paths else None
-        if person and loaded:
-            which = self._ask_swap_source()
-            if which is None:
-                return
-            face = person if which == "db" else loaded
-            label = "the Reference DB person" if which == "db" \
-                else Path(loaded).name
-        elif person:
-            face, label = person, "the Reference DB person"
-        elif loaded:
-            face, label = loaded, Path(loaded).name
-        else:
-            messagebox.showinfo(
-                "Swap into selected",
-                "Choose a face to swap in — pick a person (👤 Person…) or "
-                "load an image (🖼 Load…).")
-            return
-
-        # Kontext is the identity-preserving editor; it handles the swap in
-        # both paths, so make sure it can run before doing anything.
-        if not self._ensure_editor_ready("kontext"):
-            return
-
-        # a still selected in the gallery = swap straight into it (no gen)
-        gallery = None
-        if self.current is not None and self.session:
-            gimg, _gp, gpath = self.session[self.current]
-            if not str(gpath).lower().endswith(".gif"):
-                gallery = (gimg, str(gpath))
-
-        # either way the loaded image is consumed as the face; clear it so the
-        # app returns to normal generation (LoRAs/RAG on again)
+    def _swap_face_source(self):
+        """The face for an image-swap run: the loaded editor image wins,
+        otherwise the chosen Reference DB person. None if neither."""
         if self.ref_paths:
-            self.ref_paths = []
-            self.ref_var.set("none — text only")
-        self._refresh_editor_state()
-
-        if gallery is not None:
-            target_img, target_path = gallery
-            try:
-                iw, ih = target_img.size
-            except Exception:
-                iw, ih = SIZE_PRESETS[self.size_var.get()]
-            # Variations applies here too: N differently-seeded swap
-            # attempts on the same target, pick the best
-            try:
-                seed = int(self.seed_var.get())
-            except ValueError:
-                seed = 0
-            if self.random_seed_var.get():
-                seed = random.randrange(2**32)
-                self.seed_var.set(str(seed))
-            params = dict(
-                prompt=SWAP_PERSON_PROMPT, user_prompt="face-swapped",
-                style="", negative="", model="editor:kontext",
-                loras=[], width=iw, height=ih, seed=seed, steps=None,
-                cfg=None, batch=self.batch_var.get(),
-                random_seed=self.random_seed_var.get(),
-                transparent=False, upscale=False,
-                preset=self.preset_var.get(),
-                ref_images=[target_path, face], ref_mode="chain",
-                guidance=SWAP_GUIDANCE,
-                rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
-                editor="kontext",
-                # a swap always keeps the target picture's exact size —
-                # without this Kontext snaps to its own ~1MP dimensions
-                out_size=(iw, ih),
-                denoise=1.0)
-            self.status_var.set(f"Swapping {label} into the selected picture "
-                                "with Flux Kontext…")
-            CANCEL.clear()
-            self.busy = True
-            self.go_btn.state(["disabled"])
-            self.progress["value"] = 0
-            self._schedule_persist()
-            gen = Generator(self.ui_queue)
-            threading.Thread(target=gen.run, args=(params,), daemon=True).start()
-            return
-
-        # nothing selected: generate a RAG/LoRA base, then swap the face in.
-        # _generate(swap_face=…) forces a fresh generation and the Generator
-        # runs the Kontext swap after the base is drawn (keeping both).
-        self.status_var.set(f"Generating a base image, then swapping {label} "
-                            "in…")
-        self._generate(swap_face=face)
+            return self.ref_paths[0]
+        if self.actor_sel:
+            return self._actor_ref_path()
+        return None
 
     def _tip(self, widget, text):
         """Attach a hover tooltip and keep a reference so it isn't collected."""
@@ -5106,7 +4996,12 @@ class App:
         image, nothing selected/loaded, or a model that can't use it)."""
         if not hasattr(self, "lora_badge"):
             return
-        editing = bool(self.ref_paths)
+        # in image-swap mode a loaded image is the FACE, not an edit
+        # target — LoRAs/RAG still drive the base generation
+        swap_mode = hasattr(self, "swap_rag_var") \
+            and self.swap_rag_var.get() \
+            and (bool(self.ref_paths) or bool(self.actor_sel))
+        editing = bool(self.ref_paths) and not swap_mode
         model = self._model_raw()
         fam = model_family(model) if model else ""
         sdxl = bool(fam) and fam not in ("flux", "schnell")
@@ -5119,16 +5014,11 @@ class App:
 
     def _refresh_editor_state(self):
         """After anything that changes the editor's inputs: enable/disable the
-        editor buttons and repaint the mode badges. Swap needs a face — a DB
-        person or a loaded image; with a gallery picture selected it swaps into
-        that, otherwise it generates a RAG/LoRA base and swaps into that."""
+        editor buttons and repaint the mode badges."""
         has_gallery = bool(self.session)
         if hasattr(self, "editor_use_btn"):
             self.editor_use_btn.state(
                 ["!disabled"] if has_gallery else ["disabled"])
-        if hasattr(self, "swap_btn"):
-            has_face = bool(self.actor_sel) or bool(self.ref_paths)
-            self.swap_btn.state(["!disabled"] if has_face else ["disabled"])
         self._refresh_mode_badges()
 
     def _update_editor_btn(self):
@@ -5153,6 +5043,24 @@ class App:
                                           "preset and hit 'Try example'.")
             return
         style = self._get(self.style_box)
+        # 🔀 Use RAG & LoRA for image swap: two-step run — the styled base
+        # generates first, then the face (loaded image, else the chosen
+        # person) is applied to it. Qwen is the swap engine when installed
+        # (native multi-image = reliable identity); Kontext otherwise.
+        swap_editor = "kontext"
+        if swap_face is None and self.swap_rag_var.get():
+            swap_face = self._swap_face_source()
+            if not swap_face:
+                self.status_var.set(
+                    "Image-swap is ticked but there is no face — load one "
+                    "with 🖼 Load… or pick a 👤 Person. Generating "
+                    "normally.")
+            else:
+                if not self._editor_missing("qwen") \
+                        and self._editor_tier("qwen") != "block":
+                    swap_editor = "qwen"
+                if not self._ensure_editor_ready(swap_editor):
+                    return
         # swap_face set = a gen-then-swap run: force a fresh RAG/LoRA
         # generation (the loaded image / person is the face for the later
         # Kontext pass, NOT an edit target or an IP-Adapter guide).
@@ -5326,6 +5234,7 @@ class App:
                       rag_ref_paths=rag_refs, rag_embed_paths=rag_embed_paths,
                       style_weight=rag_weight,
                       editor=editor, swap_face=swap_face,
+                      swap_editor=swap_editor,
                       out_size=(w, h) if editing
                       and self.editor_canvas_var.get() else None,
                       denoise=round(self.change_var.get() / 100, 2))

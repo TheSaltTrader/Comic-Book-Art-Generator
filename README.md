@@ -129,21 +129,19 @@ images ever leaving the trainer. SDXL models only.
 Point 📇 **Reference DB** at a people database (built with a companion
 tool) and pick a 👤 **Person**. In plain generation their photo
 face-guides the image (SDXL); when editing, the photo joins the editor as
-context; and **🔀** swaps their face into art with Flux Kontext, keeping
-the pose, framing, costume, lighting and art style:
+context.
 
-- **A gallery picture selected** → the face is swapped straight into it.
-- **Nothing selected** → the app first *generates* a base image from your
-  prompt + preset + LoRAs + RAG map, then swaps the face in — you keep
-  both pictures. Your style pipeline builds the art; the swap only
-  changes the person.
-
-The face can also be any **loaded image** instead of a DB person — load a
-face with 🖼 Load…, and 🔀 asks which source to use if both are set. The
-**Variations** setting applies to swaps too: N variations = N base+swap
-sets, or N differently-seeded swap attempts on a selected picture. The
-ℹ button next to the Reference DB row explains exactly what applies in
-each mode.
+**🔀 Use RAG & LoRA for image swap** — a checkbox in the image-editor
+section — turns Generate into a two-step run: your prompt + preset +
+LoRAs + RAG map draw the styled picture first, exactly as usual, and
+then the face from your loaded image (🖼 Load…, or the chosen 👤 Person
+if nothing is loaded) is applied to the person in it — via **Qwen Image
+Edit** when installed (the most reliable at this; self-installs on first
+use, needs ~24 GB VRAM), otherwise Flux Kontext. Both pictures land in
+the gallery: the styled base and the face-swapped one. While the box is ticked, a loaded image is the *face*, not an edit
+target — untick it to go back to normal instruction editing.
+**Variations** applies: N variations = N base+swap pairs. The ℹ button
+explains exactly what applies in each mode.
 
 ## Quality of life
 

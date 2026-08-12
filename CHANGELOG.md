@@ -1,5 +1,29 @@
 # Changelog — Comic Book Art Creator
 
+## v1.24.0 — 2026-08-12
+- **Face swap is now a checkbox, not a button.** 🔀 **Use RAG & LoRA for
+  image swap** (in the image-editor section) replaces the "Swap into
+  selected" button. Tick it and Generate runs two steps: your prompt +
+  preset + LoRAs + RAG map draw the styled picture as usual, then the
+  face from your loaded image (or the chosen 👤 Person if nothing is
+  loaded) is applied to the person in it. Both pictures land in the
+  gallery — the styled base and the face-swapped one. While ticked, a
+  loaded image is the face, not an edit target; untick to go back to
+  normal instruction editing. Variations = N base+swap pairs. The
+  setting is remembered across restarts.
+- **The face actually lands now: the swap runs on Qwen Image Edit** when
+  it's installed (it self-installs on first use like any editor; needs
+  ~24 GB VRAM). Qwen takes multiple images natively, and in live testing
+  it transferred the face correctly on every pair — including ones where
+  Flux Kontext kept the scene but ignored the face entirely. Without
+  Qwen the swap falls back to Kontext, which preserves the scene but may
+  need a few Variations for the identity to land.
+- **Security hardening + delta review.** The LoRA trigger reader now
+  refuses oversized sidecar files (>5 MB) and caps any trigger phrase at
+  200 characters before it can reach the prompt. A full OWASP delta
+  review of everything added since v1.20 is appended to `SECURITY.md` —
+  verdict: no new attack surface; all new file parsing is bounded.
+
 ## v1.23.0 — 2026-08-12
 - **Stronger face transfer.** The swap instruction now explicitly demands
   the head and face be replaced with the second image's person — facial

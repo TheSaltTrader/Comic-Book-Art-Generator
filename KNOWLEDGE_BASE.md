@@ -341,51 +341,47 @@ photo BLOB is written to a temp JPEG at generation time and routed
   person's photo and the map's embeds **chain on one IP-Adapter** (§4,
   v1.19.0) instead of the person replacing the map.
 
-**One-click swap** (v1.19.0, extended v1.20.0 + v1.21.0; `_swap_person_in`,
-🔀) — puts a face into a picture via Flux **Kontext** with the canned
-`SWAP_PERSON_PROMPT` ("replace the person, keep pose / framing / costume /
-lighting / art style"). With a still selected in the gallery it runs as a
-direct edit: `editor:kontext`, `ref_images = [target, face]`,
-`ref_mode="chain"` (see §4 — a stitched pair does NOT swap), keeping the
-target picture's size and, like all editing, bypassing presets/LoRAs/RAG —
-the styling is already baked into the picture being edited. **v1.20.0:** the face can be the Reference DB person OR a loaded
-editor image (`self.ref_paths[0]`); when both are present
-`_ask_swap_source` (a small modal) asks which. A loaded image used as the
-face is cleared on click (returns to plain-gen so LoRAs/RAG re-enable).
-**v1.21.0 — gen-then-swap:** with *nothing* selected, 🔀 calls
-`_generate(swap_face=face)` instead: a normal plain generation runs first
-with presets/LoRAs/RAG all active (`editing` is forced off and the
-approximate IP-Adapter face guide is skipped — identity comes from the
-crisp Kontext pass), then `Generator._swap_face_pass` uploads the freshly
-drawn base + the face and runs one chained Kontext pass at the base's size
-(same pattern as the border center-clean second pass). Both the base and
-the swapped image are kept; any swap failure is swallowed with a status
-note so the base is never lost. The button therefore only needs a face —
-`_refresh_editor_state` enables it on `actor_sel or ref_paths` alone — and
-still guards on the Kontext editor being installed/fitting.
-**v1.22.0:** both swap paths switched from stitched to **chained**
-references after a user run showed the stitched pair being redrawn
-side-by-side instead of swapped (§4 lesson; fix live-validated A/B).
-**Variations applies to swaps**: gen-then-swap makes N base+swap sets
-(the Kontext pass inherits each variation's seed), a direct swap makes N
-differently-seeded attempts on the same target — both via the ordinary
-client-side batch loop, and the direct path now follows the main seed
-rules (Random / fixed). The button wears `Swap.TButton` — Danger red,
-one font size up — so the swap action reads at a glance.
-**v1.23.0 — adherence + size:** user runs showed the chained swap can
-still return the base merely restyled (identity transfer varies by
-inputs/seed), so swaps run at `SWAP_GUIDANCE` 3.0 via the graph's new
-`guidance` param (default stays 2.5 for ordinary edits) with a prompt
-that names the identity channels to copy (facial structure, eyes, skin
-tone, hair, beard). Size plumbing fixed in the same pass:
-`_swap_face_pass` takes `out_size` = the CANVAS dims from `_run` (a
-4x-upscaled base is LANCZOS-downsized before upload so the swap lands at
-canvas size, not 4x), and the direct swap passes `out_size=(iw, ih)`
-unconditionally — without it Kontext snaps to its own ~1MP dims when
-"Output at Canvas size" is unticked. Remaining known limit: Kontext-dev
-is a single-image editor at heart; if adherence stays weak on real
-inputs, the next lever is routing swaps through Qwen Image Edit
-(natively multi-image, `image1-3`).
+**Image swap — the 🔀 "Use RAG & LoRA for image swap" checkbox**
+(v1.24.0; evolved from the v1.19–v1.23 "Swap into selected" button, which
+is REMOVED along with its direct-swap path and `_ask_swap_source` modal).
+Swapping is now a *mode on plain generation*, not a separate action: with
+the box ticked, `_generate` resolves the face via `_swap_face_source()`
+(the loaded editor image wins, else the chosen Reference DB person;
+neither → a status note and the run proceeds as a normal generation) and
+sets `swap_face=<path>`. The run then has two steps: (1) the styled base
+generates exactly as usual — presets, LoRAs, RAG map, trigger injection
+all active (`editing` forced off; the approximate IP-Adapter face guide
+is skipped — identity comes from the crisp Kontext pass); (2)
+`Generator._swap_face_pass` applies the face with one **chained** Kontext
+pass per variation (§4 lesson: a stitched pair does NOT swap) at
+`SWAP_GUIDANCE` 3.0, inheriting each variation's seed, with `out_size` =
+the CANVAS dims (a 4x-upscaled base is LANCZOS-downsized first so the
+swap lands at canvas size). Both pictures are kept per variation
+(Variations = N base+swap pairs); any swap failure is swallowed with a
+status note so the base is never lost. While ticked, a loaded image is
+the FACE, not an edit target — `_refresh_mode_badges` treats swap-mode
+as non-editing so the LoRA/RAG badges stay green; untick to return to
+classic instruction editing. The checkbox persists as ui-state key
+`swap_rag`.
+
+**Swap engine choice (v1.24.0, decided by live A/B)** — Kontext-dev is a
+single-image editor at heart: with two chained references it anchors on
+whichever comes FIRST. Measured on two base+face pairs at fixed seed:
+base-first preserved the scene but transferred the face 0/2; face-first
+transferred 1/2 but collapsed to a portrait redraw (scene lost) on the
+other. **Qwen Image Edit is natively multi-image (`image1`/`image2` via
+`TextEncodeQwenImageEditPlus`) and went 2/2** — identity landed AND the
+scene/pose/style stayed intact, including a cross-gender swap onto a
+small distant figure. So `_generate` picks `swap_editor="qwen"` whenever
+the Qwen files are installed and `_editor_tier("qwen") != "block"`
+(~24 GB VRAM), falling back to the Kontext chain (base-first — keeps the
+scene; identity may not always land) otherwise; `_ensure_editor_ready`
+runs on whichever was picked. `Generator._swap_face_pass(editor=…)`
+builds `build_qwen_edit_graph` with `QWEN_SWAP_PROMPT` ("image 1 / image
+2" wording; conditional "beard, glasses or marks only if the person in
+image 2 actually has them" — an unconditional list made Qwen hallucinate
+glasses) or the Kontext chain as before. Same out_size/seed plumbing in
+both.
 
 **LoRA trigger auto-injection** (v1.21.0; `lora_trigger`,
 `_safetensors_metadata`) — each ticked LoRA's activation keyword(s) are

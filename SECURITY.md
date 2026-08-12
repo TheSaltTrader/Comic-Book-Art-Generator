@@ -46,3 +46,32 @@ responses, and the local engine port.
   filenames must be sanitized to basenames before writing.
 - Secrets go through `dpapi_encrypt`/`dpapi_decrypt` — never plaintext JSON.
 - Keep the engine on `127.0.0.1`; never expose `--listen 0.0.0.0`.
+
+
+## Delta review — v1.24.0 (2026-08-12)
+
+Scope: everything added since the original audit (trigger auto-injection,
+gen-then-swap / image-swap checkbox, chained Kontext references, sidecar
+handling).
+
+- **LoRA sidecar / metadata parsing** (`lora_trigger`,
+  `_safetensors_metadata`): all reads are bounded — safetensors header cap
+  20 MB, sidecar JSON cap 5 MB, and the extracted trigger phrase is capped
+  at 200 chars before it can reach the prompt (a hostile "LoRA" shipped
+  with a megabyte trigger cannot balloon requests). Parsing is
+  `json.loads` inside try/except; values are only ever joined into prompt
+  TEXT for the loopback engine — no path, shell or query construction.
+  File paths come from the app's own LoRA-folder scan, never from user
+  strings (imports still sanitize to basename, safetensors-only).
+- **CivitAI trained-words sidecar write**: JSON-encoded via `json.dumps`,
+  written next to the already-sanitized basename inside `models\loras`.
+  No new hosts; the existing HTTPS + fixed-host rules are unchanged.
+- **Swap pipeline**: uploads and renders go exclusively to the loopback
+  engine (`127.0.0.1:8188`); the new `ref_mode`/`guidance` values are
+  internal constants, never user-supplied strings.
+- **UI/persistence**: the image-swap checkbox persists as a boolean in
+  `settings.json`; no secrets, no new files outside the app folder, no
+  new listeners, no new dependencies.
+
+Verdict: no new attack surface beyond bounded local-file parsing, which is
+now explicitly capped. A01/A03/A05/A08/A10 postures unchanged.
