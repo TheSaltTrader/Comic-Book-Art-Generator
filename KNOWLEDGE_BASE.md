@@ -396,6 +396,34 @@ builds `build_qwen_edit_graph` with `QWEN_SWAP_PROMPT` ("image 1 / image
 2" wording) or the Kontext chain as before. Same out_size/seed plumbing
 in both.
 
+**Detail-preserving + multi-face swap (v1.26.0)** — the swap runs at
+FULL denoise (identity needs the freedom: partial denoise was measured
+and REJECTED — 0.85 preserved barely more than a full re-render yet
+already failed to transfer the face on the stylized test base) and the
+result is merged back onto the base client-side by `swap_composite()`:
+per-pixel |Δ| → blur → threshold (2.4× mean, floor 16) → **wide
+morphological opening** (`MinFilter(k)`/`MaxFilter(k+4)`, k ≈
+short-side/32 — kills the thin ribbons caused by slight silhouette
+drift, which otherwise ghost as halos) → feathered blend. Only the
+genuinely changed region (the head) comes from the swap; everything
+else is the base's exact pixels — measured on the photoreal test scene:
+base deviation 2.2 vs 19.6 for the raw swap, identity intact. Degenerate
+inputs degrade gracefully (uniform change → threshold keeps only the
+strongest region; zero change → base returns). The graphs RETAIN a
+`swap_denoise` capability (base-latent sampling at partial denoise) for
+future use — and the CRITICAL GUARD stands: the graphs never read the
+params' ordinary `denoise` (the editor Change-amount slider rides in
+every editing params dict and would silently cripple normal edits;
+regression-asserted). The swap prompts' ending is style-aware ("if image
+1 is photographic, keep the face photographic; if stylized art, that
+style") instead of the blanket "not as a photograph" that fought
+realistic bases. Faces are a LIST end to end: `_swap_face_source()`
+returns all loaded editor images (capped `SWAP_MAX_FACES` 2 — Qwen's
+encoder takes 3 images total) else `_actor_ref_paths()` (today one
+headshot; a multi-photo Actor DB changes only that function);
+`swap_face_prompt(editor, n)` pluralizes the instruction ("images 2 and
+3 are photos of the same person — combine them").
+
 **Prompt-token leakage (v1.24.1 lesson — cost a user a bearded man on a
 woman's face)**: NEVER name concrete traits in a swap prompt. "Copy
 their … beard, glasses …" reads as an example list to a human, but with

@@ -1,5 +1,28 @@
 # Changelog — Comic Book Art Creator
 
+## v1.26.0 — 2026-08-12
+- **Detail-preserving swap.** The swapped picture used to be a full
+  re-render of the base — softer reflections, flatter sunlight, lost
+  micro-detail. Now the swap result is merged back onto the base: only
+  the genuinely changed region (the new head, and anything else the swap
+  really altered) comes from the swap; everywhere else you get the
+  base's exact original pixels. Measured on a photoreal test scene, the
+  final image deviates from the base ~9× less than before, with the
+  face transfer at full strength.
+- **Style-aware swap wording.** The swap instruction no longer forbids
+  photographic rendering outright — it now matches the base: a
+  photorealistic base keeps a photorealistic face, a stylized base keeps
+  a stylized one.
+- **Multiple face photos.** Load several pictures of the same person
+  (🖼 Load… multi-select) and the swap uses up to two of them together
+  for a sharper likeness. The Reference DB person flows through the same
+  pipeline — when the actor database gains multiple photos per person,
+  they'll be used automatically.
+- **Zoom the preview.** Scroll the mouse wheel over the picture to zoom
+  in (anchored at the cursor), drag to pan while zoomed, double-click to
+  fit again. Works on stills and playing GIFs; switching pictures resets
+  the view.
+
 ## v1.25.0 — 2026-08-12
 - **Qwen is part of the base install, and updates now reach every
   install.** Fresh Setup runs download the full model pack including the

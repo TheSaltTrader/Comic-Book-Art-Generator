@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.25.0"
+APP_VERSION = "1.26.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -752,18 +752,34 @@ def build_kontext_graph(p):
     g["34"] = {"class_type": "ConditioningZeroOut",
                "inputs": {"conditioning": ["4", 0]}}
     # by default the output canvas follows the (first) reference; with
-    # out_size the references only condition and a fresh canvas sets size
+    # out_size the references only condition and a fresh canvas sets
+    # size. swap_denoise (< 1.0) = detail-preserving mode: sample from
+    # the first image's own latent at out_size so unedited regions keep
+    # its pixels. The editors' ordinary "denoise" param (Change-amount
+    # slider) is deliberately NOT read here.
+    den = p.get("swap_denoise") or 1.0
     if p.get("out_size"):
         ow, oh = p["out_size"]
-        g["35"] = {"class_type": "EmptySD3LatentImage",
-                   "inputs": {"width": ow, "height": oh, "batch_size": 1}}
-        latent_ref = ["35", 0]
+        if den < 1.0:
+            g["35"] = {"class_type": "ImageScale",
+                       "inputs": {"image": ["10", 0],
+                                  "upscale_method": "lanczos",
+                                  "width": ow, "height": oh,
+                                  "crop": "disabled"}}
+            g["36"] = {"class_type": "VAEEncode",
+                       "inputs": {"pixels": ["35", 0], "vae": ["2", 2]}}
+            latent_ref = ["36", 0]
+        else:
+            g["35"] = {"class_type": "EmptySD3LatentImage",
+                       "inputs": {"width": ow, "height": oh,
+                                  "batch_size": 1}}
+            latent_ref = ["35", 0]
     g["6"] = {"class_type": "KSampler",
               "inputs": {"model": ["1", 0], "positive": ["33", 0],
                          "negative": ["34", 0], "latent_image": latent_ref,
                          "seed": p["seed"], "steps": p.get("steps") or 20,
                          "cfg": 1.0, "sampler_name": "euler",
-                         "scheduler": "simple", "denoise": 1.0}}
+                         "scheduler": "simple", "denoise": den}}
     g["7"] = {"class_type": "VAEDecode",
               "inputs": {"samples": ["6", 0], "vae": ["2", 2]}}
     g["8"] = {"class_type": "SaveImage",
@@ -802,17 +818,32 @@ def build_qwen_edit_graph(p):
     g["31"] = {"class_type": "VAEEncode",
                "inputs": {"pixels": ["30", 0], "vae": ["3", 0]}}
     latent_ref = ["31", 0]
+    # swap_denoise (< 1.0) = detail-preserving mode: the sampler starts
+    # from image 1's own latent so unedited regions keep its pixels. The
+    # editors' ordinary "denoise" param is deliberately NOT read here.
+    den = p.get("swap_denoise") or 1.0
     if p.get("out_size"):
         ow, oh = p["out_size"]
-        g["35"] = {"class_type": "EmptySD3LatentImage",
-                   "inputs": {"width": ow, "height": oh, "batch_size": 1}}
-        latent_ref = ["35", 0]
+        if den < 1.0:
+            g["35"] = {"class_type": "ImageScale",
+                       "inputs": {"image": load_refs[0],
+                                  "upscale_method": "lanczos",
+                                  "width": ow, "height": oh,
+                                  "crop": "disabled"}}
+            g["36"] = {"class_type": "VAEEncode",
+                       "inputs": {"pixels": ["35", 0], "vae": ["3", 0]}}
+            latent_ref = ["36", 0]
+        else:
+            g["35"] = {"class_type": "EmptySD3LatentImage",
+                       "inputs": {"width": ow, "height": oh,
+                                  "batch_size": 1}}
+            latent_ref = ["35", 0]
     g["6"] = {"class_type": "KSampler",
               "inputs": {"model": ["1", 0], "positive": ["20", 0],
                          "negative": ["21", 0], "latent_image": latent_ref,
                          "seed": p["seed"], "steps": p.get("steps") or 20,
                          "cfg": 2.5, "sampler_name": "euler",
-                         "scheduler": "simple", "denoise": 1.0}}
+                         "scheduler": "simple", "denoise": den}}
     g["7"] = {"class_type": "VAEDecode",
               "inputs": {"samples": ["6", 0], "vae": ["3", 0]}}
     g["8"] = {"class_type": "SaveImage",
@@ -1459,11 +1490,49 @@ SWAP_PERSON_PROMPT = (
     "matching every visible feature of the person in the second image "
     "exactly, adding nothing that person does not have. Keep everything "
     "else from the first image exactly as it is — pose, body, clothing, "
-    "framing, background, lighting, colors and art style. Render the new "
-    "face in the first image's art style, not as a photograph.")
+    "framing, background, lighting, colors and art style. Match the "
+    "first image's rendering style for the new face exactly: if the "
+    "first image is photographic, keep the face photographic; if it is "
+    "stylized art, render the face in that same style.")
 # swaps follow the instruction better with guidance above the editing
 # default 2.5; too high drifts the style
 SWAP_GUIDANCE = 3.0
+# NB: partial swap_denoise was measured and REJECTED as the fidelity fix —
+# at 0.85 it preserved barely more than a full re-render yet already broke
+# identity transfer. The shipped approach is swap_composite() below: full
+# denoise for the swap, then restore the base's pixels wherever the swap
+# didn't genuinely change anything. (The graphs keep the swap_denoise
+# capability for future use.)
+
+
+def swap_composite(base, swapped, feather=25):
+    """Merge a face-swap result back onto its base: keep `swapped` only
+    where it genuinely differs (the reworked head and any truly changed
+    areas), restore the base's exact pixels — reflections, lighting,
+    fine detail — everywhere else. A wide morphological opening removes
+    the thin ribbons caused by slight silhouette drift between the two
+    renders, so outlines don't ghost. Returns the merged image; on any
+    failure the raw `swapped` comes back unchanged."""
+    try:
+        import numpy as np
+        b = np.asarray(base.convert("RGB"), dtype=np.float32)
+        s = np.asarray(swapped.convert("RGB").resize(base.size),
+                       dtype=np.float32)
+        diff = np.abs(b - s).mean(axis=2)
+        dimg = Image.fromarray(np.uint8(np.clip(diff, 0, 255)))
+        diff = np.asarray(dimg.filter(ImageFilter.GaussianBlur(feather // 2)),
+                          dtype=np.float32)
+        thr = max(16.0, 2.4 * float(diff.mean()))
+        hard = Image.fromarray(np.uint8((diff >= thr) * 255))
+        k = max(9, (min(base.size) // 32) | 1)
+        hard = hard.filter(ImageFilter.MinFilter(k))
+        hard = hard.filter(ImageFilter.MaxFilter(k + 4))
+        soft = hard.filter(ImageFilter.GaussianBlur(feather))
+        m = np.asarray(soft, dtype=np.float32)[..., None] / 255.0
+        out = b * (1.0 - m) + s * m
+        return Image.fromarray(np.uint8(np.clip(out, 0, 255)))
+    except Exception:
+        return swapped
 # Qwen Image Edit is natively multi-image (image1/image2) and transfers
 # identity far more reliably than Kontext's chained references — it is the
 # preferred swap engine whenever its models are installed (live A/B 2026-08:
@@ -1480,8 +1549,30 @@ QWEN_SWAP_PROMPT = (
     "person does not have. The character's gender and age must match the "
     "person in image 2. Keep everything else in image 1 exactly "
     "unchanged — pose, body, clothing, framing, background, lighting, "
-    "colors and art style. Render the new face in image 1's art style, "
-    "not as a photograph.")
+    "colors and art style. Match image 1's rendering style for the new "
+    "face exactly: if image 1 is photographic, keep the face "
+    "photographic; if it is stylized art, render the face in that same "
+    "style.")
+def swap_face_prompt(editor, n_faces):
+    """The swap instruction, adjusted when several photos of the SAME
+    person are supplied (they sharpen the likeness — e.g. a multi-photo
+    Actor DB or several loaded pictures)."""
+    if editor == "qwen":
+        if n_faces <= 1:
+            return QWEN_SWAP_PROMPT
+        refs = "images 2 and 3" if n_faces == 2 else "images 2, 3 and 4"
+        return (QWEN_SWAP_PROMPT.replace("image 2", refs)
+                + f" {refs[0].upper() + refs[1:]} are photos of the same "
+                  "person — combine them for a complete, accurate "
+                  "likeness.")
+    if n_faces <= 1:
+        return SWAP_PERSON_PROMPT
+    return (SWAP_PERSON_PROMPT.replace("the second image",
+                                       "the later images")
+            + " The images after the first are all photos of the same "
+              "person — combine them for a complete, accurate likeness.")
+
+
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -2154,10 +2245,12 @@ class Generator:
         finally:
             ws.close()
 
-    def _swap_face_pass(self, ws, base_img, face_path, seed=0, out_size=None,
+    def _swap_face_pass(self, ws, base_img, face_paths, seed=0, out_size=None,
                         editor="kontext"):
         """Second pass of a gen-then-swap: put a face into the freshly drawn
-        base image. editor="qwen" (preferred when installed) is natively
+        base image. face_paths = one or more photos of the SAME person
+        (several sharpen the likeness — multi-photo Actor DBs plug in
+        here). editor="qwen" (preferred when installed) is natively
         multi-image and transfers identity reliably; "kontext" falls back
         to chained references (a stitched pair just gets redrawn
         side-by-side instead of swapped). out_size = the canvas size; a
@@ -2167,6 +2260,8 @@ class Generator:
         if CANCEL.is_set():
             return None
         try:
+            if isinstance(face_paths, str):
+                face_paths = [face_paths]
             label = "Qwen" if editor == "qwen" else "Flux Kontext"
             self.q.put(("status", f"Swapping the face in ({label}) — the "
                                   "first swap can take minutes while the "
@@ -2187,15 +2282,16 @@ class Generator:
             if (up.width, up.height) != size:
                 up = up.resize(size, Image.LANCZOS)
             base_name = self._upload_pil(up, "cbac_swap_base.png")
-            face_name = self._upload_ref(face_path)
+            face_names = [self._upload_ref(p) for p in face_paths]
+            prompt = swap_face_prompt(editor, len(face_names))
             if editor == "qwen":
-                cp = dict(prompt=QWEN_SWAP_PROMPT, editor="qwen",
-                          edit_image_names=[base_name, face_name],
+                cp = dict(prompt=prompt, editor="qwen",
+                          edit_image_names=[base_name] + face_names,
                           out_size=size, seed=seed, steps=None)
                 graph = build_qwen_edit_graph(cp)
             else:
-                cp = dict(prompt=SWAP_PERSON_PROMPT, editor="kontext",
-                          edit_image_names=[base_name, face_name],
+                cp = dict(prompt=prompt, editor="kontext",
+                          edit_image_names=[base_name] + face_names,
                           ref_mode="chain", guidance=SWAP_GUIDANCE,
                           out_size=size, seed=seed, steps=None)
                 graph = build_kontext_graph(cp)
@@ -2209,7 +2305,10 @@ class Generator:
             out = self._await_images(ws, r.json()["prompt_id"],
                                      timeout=1800)
             if out:
-                return self._fetch_image(out[0])
+                # merge the swap back onto the base so reflections,
+                # lighting and detail outside the reworked area keep the
+                # base's actual pixels instead of a re-rendered copy
+                return swap_composite(up, self._fetch_image(out[0]))
         except Exception as e:
             self.q.put(("status", f"Face swap skipped ({e}); kept the base "
                                   "image."))
@@ -2985,12 +3084,13 @@ class App:
         self._tip(self.swap_cb,
                   "Two-step generation. Step 1: your prompt + preset + LoRAs "
                   "+ RAG map generate the styled picture as usual. Step 2: "
-                  "the face from your loaded image (🖼 Load…, or the 👤 "
-                  "Person if nothing is loaded) is applied to the person in "
-                  "it — via Qwen Image Edit when installed (most reliable), "
-                  "else Flux Kontext. Both pictures are kept. While this "
-                  "is ticked, a loaded image is the FACE — not an edit "
-                  "target. Honors Variations: N = N base+swap pairs.")
+                  "the face from your loaded image(s) (🖼 Load… — several "
+                  "photos of the same person sharpen the likeness; the 👤 "
+                  "Person is used if nothing is loaded) is applied to the "
+                  "person in it — via Qwen Image Edit when installed (most "
+                  "reliable), else Flux Kontext. Both pictures are kept. "
+                  "While this is ticked, loaded images are the FACE — not "
+                  "edit targets. Honors Variations: N = N base+swap pairs.")
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         erow.columnconfigure(1, weight=1)
         ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
@@ -3371,6 +3471,18 @@ class App:
         self.canvas = Canvas(right, bg=BG2, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky=NSEW)
         self.canvas.bind("<Configure>", lambda e: self._show_current())
+        # wheel-zoom the preview: scroll to zoom at the cursor, drag to
+        # pan while zoomed, double-click to reset to fit
+        self._zoom = 1.0
+        self._view_c = None       # zoomed view center in image coords
+        self._zoom_for = None     # which gallery index the zoom belongs to
+        self.canvas.bind("<MouseWheel>", self._canvas_zoom)
+        self.canvas.bind("<ButtonPress-1>", self._pan_start)
+        self.canvas.bind("<B1-Motion>", self._pan_move)
+        self.canvas.bind("<Double-Button-1>", self._zoom_reset)
+        self._tip(self.canvas,
+                  "Scroll to zoom in on the picture (zooms at the cursor), "
+                  "drag to pan while zoomed, double-click to fit again.")
 
         brow = ttk.Frame(right); brow.grid(row=2, column=0, sticky=NSEW, pady=(8, 4))
         saveas_btn = ttk.Button(brow, text="💾 Save As…", command=self._save_as)
@@ -3640,12 +3752,15 @@ class App:
             "🔀 USE RAG & LoRA FOR IMAGE SWAP (ticked):\n"
             "  • Generate runs TWO steps: your prompt + preset + LoRAs +\n"
             "    RAG map draw the styled picture as usual, then the face\n"
-            "    from your loaded image (or the 👤 Person if nothing is\n"
-            "    loaded) is applied to it with Flux Kontext\n"
+            "    from your loaded image(s) (or the 👤 Person if nothing\n"
+            "    is loaded) is applied to it — Qwen Image Edit when\n"
+            "    installed, else Flux Kontext\n"
+            "  • Load SEVERAL photos of the same person and they are all\n"
+            "    used together for a sharper likeness\n"
             "  • Both pictures land in the gallery — the styled base and\n"
             "    the face-swapped one\n"
-            "  • While ticked, a loaded image is the FACE, not an edit\n"
-            "    target\n\n"
+            "  • While ticked, loaded images are the FACE, not edit\n"
+            "    targets\n\n"
             "Tip: for LoRA-styled fresh art guided by a face, select the "
             "person and generate WITHOUT editor images on an SDXL model. "
             "To restyle or stage the person directly, use ➡ To editor and "
@@ -5026,14 +5141,29 @@ class App:
         self._refresh_editor_state()
         self._schedule_persist()
 
+    # a swap sends the base + up to this many face photos (Qwen's encoder
+    # takes 3 images total; Kontext chains up to 4 — 2 keeps both happy)
+    SWAP_MAX_FACES = 2
+
     def _swap_face_source(self):
-        """The face for an image-swap run: the loaded editor image wins,
-        otherwise the chosen Reference DB person. None if neither."""
+        """The face photo(s) for an image-swap run, as a list: every loaded
+        editor image (several photos of the same person sharpen the
+        likeness), otherwise the chosen Reference DB person's photo(s).
+        Empty list if neither. A future multi-photo Actor DB only needs
+        `_actor_ref_paths` to return more entries — everything downstream
+        already takes the list."""
         if self.ref_paths:
-            return self.ref_paths[0]
+            return list(self.ref_paths[:self.SWAP_MAX_FACES])
         if self.actor_sel:
-            return self._actor_ref_path()
-        return None
+            return self._actor_ref_paths()[:self.SWAP_MAX_FACES]
+        return []
+
+    def _actor_ref_paths(self):
+        """All available photos of the chosen Reference DB person. The
+        current DB schema stores one headshot per actor; a multi-photo DB
+        plugs in here without touching the swap pipeline."""
+        p = self._actor_ref_path()
+        return [p] if p else []
 
     def _tip(self, widget, text):
         """Attach a hover tooltip and keep a reference so it isn't collected."""
@@ -5099,6 +5229,8 @@ class App:
         # person) is applied to it. Qwen is the swap engine when installed
         # (native multi-image = reliable identity); Kontext otherwise.
         swap_editor = "kontext"
+        if isinstance(swap_face, str):
+            swap_face = [swap_face]
         if swap_face is None and self.swap_rag_var.get():
             swap_face = self._swap_face_source()
             if not swap_face:
@@ -5513,12 +5645,91 @@ class App:
     def _draw_frame(self, img):
         cw = max(self.canvas.winfo_width(), 50)
         ch = max(self.canvas.winfo_height(), 50)
-        scale = min(cw / img.width, ch / img.height, 1.0)
-        disp = img.resize((int(img.width * scale), int(img.height * scale)),
-                          Image.LANCZOS)
+        base = min(cw / img.width, ch / img.height, 1.0)
+        if self._zoom <= 1.001:
+            disp = img.resize((int(img.width * base), int(img.height * base)),
+                              Image.LANCZOS)
+            self.canvas.delete("all")
+            self._tk_img = ImageTk.PhotoImage(disp)
+            self.canvas.create_image(cw // 2, ch // 2, image=self._tk_img)
+            return
+        # zoomed: crop only the visible window, then scale — fast at any
+        # zoom because the output never exceeds the canvas size
+        eff = base * self._zoom
+        vw, vh = cw / eff, ch / eff
+        cx, cy = self._view_c or (img.width / 2, img.height / 2)
+        cx = min(max(cx, vw / 2), img.width - vw / 2) \
+            if vw < img.width else img.width / 2
+        cy = min(max(cy, vh / 2), img.height - vh / 2) \
+            if vh < img.height else img.height / 2
+        self._view_c = (cx, cy)
+        box = (max(0, int(cx - vw / 2)), max(0, int(cy - vh / 2)),
+               min(img.width, int(cx + vw / 2) + 1),
+               min(img.height, int(cy + vh / 2) + 1))
+        crop = img.crop(box)
+        disp = crop.resize((max(1, int(crop.width * eff)),
+                            max(1, int(crop.height * eff))), Image.LANCZOS)
         self.canvas.delete("all")
         self._tk_img = ImageTk.PhotoImage(disp)
         self.canvas.create_image(cw // 2, ch // 2, image=self._tk_img)
+
+    def _current_frame(self):
+        """The image the preview shows right now (gif frame or still)."""
+        frames = getattr(self, "_gif_frames", [])
+        if frames:
+            return frames[(self._gif_idx - 1) % len(frames)]
+        if self.current is None or not self.session:
+            return None
+        return self.session[self.current][0]
+
+    def _canvas_zoom(self, ev):
+        img = self._current_frame()
+        if img is None:
+            return "break"
+        cw = max(self.canvas.winfo_width(), 50)
+        ch = max(self.canvas.winfo_height(), 50)
+        base = min(cw / img.width, ch / img.height, 1.0)
+        old = self._zoom
+        new = min(8.0, max(1.0, old * (1.25 if ev.delta > 0 else 0.8)))
+        if abs(new - old) < 1e-6:
+            return "break"
+        # keep the image point under the cursor stationary while zooming
+        c = self._view_c or (img.width / 2, img.height / 2)
+        dx, dy = ev.x - cw / 2, ev.y - ch / 2
+        px, py = c[0] + dx / (base * old), c[1] + dy / (base * old)
+        if new <= 1.001:
+            self._zoom, self._view_c = 1.0, None
+        else:
+            self._zoom = new
+            self._view_c = (px - dx / (base * new), py - dy / (base * new))
+        self.canvas.configure(cursor="fleur" if self._zoom > 1 else "")
+        self._draw_frame(img)
+        return "break"
+
+    def _pan_start(self, ev):
+        self._pan_from = (ev.x, ev.y, self._view_c)
+
+    def _pan_move(self, ev):
+        if self._zoom <= 1.0 or not getattr(self, "_pan_from", None):
+            return
+        img = self._current_frame()
+        if img is None:
+            return
+        x0, y0, c0 = self._pan_from
+        c0 = c0 or (img.width / 2, img.height / 2)
+        cw = max(self.canvas.winfo_width(), 50)
+        ch = max(self.canvas.winfo_height(), 50)
+        eff = min(cw / img.width, ch / img.height, 1.0) * self._zoom
+        self._view_c = (c0[0] - (ev.x - x0) / eff,
+                        c0[1] - (ev.y - y0) / eff)
+        self._draw_frame(img)     # clamps the view to the image
+
+    def _zoom_reset(self, _ev=None):
+        self._zoom, self._view_c = 1.0, None
+        self.canvas.configure(cursor="")
+        img = self._current_frame()
+        if img is not None:
+            self._draw_frame(img)
 
     def _stop_gif(self):
         if getattr(self, "_gif_job", None):
@@ -5553,6 +5764,12 @@ class App:
 
     def _show_current(self):
         self._stop_gif()
+        # switching to a different picture resets the zoom; a mere canvas
+        # resize (same picture) keeps it
+        if self.current != self._zoom_for:
+            self._zoom, self._view_c = 1.0, None
+            self.canvas.configure(cursor="")
+            self._zoom_for = self.current
         self.canvas.delete("all")
         if self.current is None or not self.session:
             self.canvas.create_text(
