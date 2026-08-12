@@ -1,5 +1,17 @@
 # Changelog — Comic Book Art Creator
 
+## v1.25.0 — 2026-08-12
+- **Qwen is part of the base install, and updates now reach every
+  install.** Fresh Setup runs download the full model pack including the
+  Qwen editor. More importantly for existing installs: the app-updater
+  used to replace only the exe, leaving the on-disk model list
+  (`models_manifest.json`) frozen at whatever version you first
+  installed — which is why models added in later versions (like Qwen)
+  never appeared in your update popup. The exe now carries its own model
+  list and refreshes the disk copy at startup, so after any app update
+  the "Updates available" popup offers exactly what the new version
+  needs. Accept it once and the swap runs on Qwen from then on.
+
 ## v1.24.1 — 2026-08-12
 - **Wrong-face fix (the "bearded man" bug).** The swap instructions
   mentioned concrete traits ("beard, glasses…") as examples of what to

@@ -136,9 +136,9 @@ section — turns Generate into a two-step run: your prompt + preset +
 LoRAs + RAG map draw the styled picture first, exactly as usual, and
 then the face from your loaded image (🖼 Load…, or the chosen 👤 Person
 if nothing is loaded) is applied to the person in it — via **Qwen Image
-Edit** when installed (the most reliable at this; self-installs on first
-use, needs ~24 GB VRAM), otherwise Flux Kontext. Both pictures land in
-the gallery: the styled base and the face-swapped one. While the box is ticked, a loaded image is the *face*, not an edit
+Edit**, which is part of the base install (needs ~24 GB VRAM to run;
+without it Flux Kontext is used). Both pictures land in the gallery:
+the styled base and the face-swapped one. While the box is ticked, a loaded image is the *face*, not an edit
 target — untick it to go back to normal instruction editing.
 **Variations** applies: N variations = N base+swap pairs. The ℹ button
 explains exactly what applies in each mode.
@@ -183,11 +183,16 @@ first use downloads a small background-removal model (~180 MB).
 The models and engine are too big for a Git repo, so a release ships the
 app plus **`Setup.exe`** — a graphical installer that makes the folder
 fully self-contained: it downloads a private Python runtime (into
-`python\`, nothing installed system-wide), the engine, and the starter
-model pack (~36 GB), all with a progress log. Requirements on the new
+`python\`, nothing installed system-wide), the engine, and the full
+model pack — base models, LoRAs, the Kontext and Qwen editors, and the
+animator (~130 GB), all with a progress log. Requirements on the new
 machine: **just 64-bit Windows 10/11, an NVIDIA GPU with a current
-driver, and ~60 GB free disk** — no Python, no git, no anything else.
+driver, and ~170 GB free disk** — no Python, no git, no anything else.
 Tick *"Engine only"* in Setup to skip the model downloads.
+
+Existing installs stay current automatically: the app carries its model
+list inside the exe, so after any app update the startup check offers
+whatever models the new version needs.
 (`Setup.exe --cli --skip-models` works for scripted installs.)
 
 Windows SmartScreen will warn about unsigned exes on a machine that

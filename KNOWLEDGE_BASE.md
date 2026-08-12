@@ -108,6 +108,20 @@ move → download models → `kill_engine()` → reboot engine).
 
 ---
 
+**Manifest staleness (v1.25.0 — why installs missed Qwen)**: the app
+self-updater swaps ONLY the exe; `app\models_manifest.json` on disk
+stayed at whatever version was first unzipped, so `check_model_updates`
+(which reads that file) never saw models added later — a user's install
+never offered Qwen although the manifest in the repo had carried it for
+weeks. Fix: the exe bundles the manifest it was built with
+(`--add-data "app\models_manifest.json;."`) and `sync_bundled_manifest()`
+writes it over a differing disk copy at startup (frozen only; validates
+JSON before replacing; the disk copy remains the single source Setup.exe
+reads). Rule: any data file the app READS at runtime and the release
+ships must either be embedded or explicitly refreshed by the updater —
+exe-only self-updates silently fork it. (`presets.json` is deliberately
+NOT synced — users edit it.)
+
 ## 3. Building and releasing
 
 No spec file is checked in. These commands are the source of truth; both
@@ -120,6 +134,7 @@ several minutes of work):
 venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed `
   --name ComicArtCreator --icon "<abs>\app\icon.ico" `
   --version-file "<abs>\app\version_app.txt" --collect-all av `
+  --add-data "<abs>\app\models_manifest.json;." `
   --distpath dist_app --workpath build_app --specpath build_app `
   "<abs>\app\comic_art_creator.py"
 

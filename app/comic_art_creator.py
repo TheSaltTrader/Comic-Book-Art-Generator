@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.24.1"
+APP_VERSION = "1.25.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -365,6 +365,30 @@ def _visible_loras(loras):
 # --------------------------------------------------------------------------
 # model update check (HuggingFace)
 # --------------------------------------------------------------------------
+
+def sync_bundled_manifest():
+    """The self-updater swaps only the exe, so app\\models_manifest.json
+    on disk can be YEARS behind the app — and the update check then never
+    offers models added since (this is how installs missed Qwen). The exe
+    now carries the manifest it was built with; write it over a stale disk
+    copy at startup so every app update also delivers the current model
+    list. The disk copy stays the single source Setup.exe reads."""
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        src = Path(sys._MEIPASS) / "models_manifest.json"
+        if not src.exists():
+            return False
+        new = src.read_bytes()
+        json.loads(new)     # never replace a good file with a broken one
+        if MANIFEST_FILE.exists() and MANIFEST_FILE.read_bytes() == new:
+            return False
+        MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MANIFEST_FILE.write_bytes(new)
+        return True
+    except Exception:
+        return False
+
 
 def check_model_updates():
     """Compare managed model files against their HuggingFace originals.
@@ -4409,7 +4433,10 @@ class App:
 
     # -------------------------------------------------- model updates
     def _check_updates_bg(self):
-        # first, apply any update downloaded last session while its file
+        # the exe carries the manifest it was built with — refresh a stale
+        # disk copy first so the check below sees the current model list
+        sync_bundled_manifest()
+        # then apply any update downloaded last session while its file
         # was locked by the engine
         try:
             manifest = json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
