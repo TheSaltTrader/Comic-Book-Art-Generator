@@ -1,5 +1,25 @@
 # Changelog — Comic Book Art Creator
 
+## v1.20.0 — 2026-08-12
+- **LoRA / RAG status badges, top-right.** Two badges next to the GPU meter
+  show at a glance whether LoRAs and your RAG map will affect the next
+  generation: **green = will apply**, **red = won't**. LoRA is green when at
+  least one is ticked and you're not editing a loaded image; RAG is green
+  when a valid map is loaded, you're not editing, and the model is SDXL (RAG
+  image guidance needs SDXL, so it's red on Flux). Loading an editor image
+  turns both red; clearing it turns them back green.
+- **Swap into selected now takes a loaded image as the face too** — not just
+  the Reference DB person. When both are available it asks which to use. The
+  loaded image is consumed by the swap and cleared afterwards, so LoRAs and
+  RAG switch back on for your next generation. It no longer requires a DB at
+  all — load a face and swap it into any selected picture.
+- **Hover tooltips** explain every image-editor control (Load, Use selected,
+  Reference DB, Person, To editor, Swap, editor engine, canvas size, and the
+  new badges). The wordy image-editor heading is now a brief line, with the
+  detail moved into the tooltips.
+- The three primary **Generate buttons** (art, animation, border) are now the
+  same size.
+
 ## v1.19.0 — 2026-08-12
 - **LoRA + RAG + a person now combine in one generation.** When an
   embeddings-only ("private") RAG map and a Reference DB person are both

@@ -331,16 +331,34 @@ photo BLOB is written to a temp JPEG at generation time and routed
   person's photo and the map's embeds **chain on one IP-Adapter** (§4,
   v1.19.0) instead of the person replacing the map.
 
-**One-click swap** (v1.19.0, `_swap_person_in`, 🔀 Swap into selected) —
-sends the selected history image + the chosen person to Flux **Kontext**
-with the canned `SWAP_PERSON_PROMPT` ("replace the person, keep pose /
-framing / costume / lighting / art style"), forcing `editor:kontext` and
-`ref_images = [selected, person]` and keeping the source picture's size.
-It reuses `build_kontext_graph` (the same 2-image stitch the multi-ref
-editor uses) and, like all editing, bypasses presets/LoRAs/RAG — the
-styling is already baked into the picture being edited. The button enables
-once history has a still image (`_update_editor_btn`) and guards on a
-person being selected and the Kontext editor being installed/fitting.
+**One-click swap** (v1.19.0, extended v1.20.0; `_swap_person_in`, 🔀 Swap
+into selected) — puts a face into the selected history image via Flux
+**Kontext** with the canned `SWAP_PERSON_PROMPT` ("replace the person, keep
+pose / framing / costume / lighting / art style"), forcing `editor:kontext`
+and `ref_images = [target, face]` and keeping the target picture's size. It
+reuses `build_kontext_graph` (the same 2-image stitch the multi-ref editor
+uses) and, like all editing, bypasses presets/LoRAs/RAG — the styling is
+already baked into the picture being edited. **v1.20.0:** the face can be
+the Reference DB person OR a loaded editor image (`self.ref_paths[0]`); when
+both are present `_ask_swap_source` (a small modal) asks which. A loaded
+image used as the face is cleared on click (returns to plain-gen so
+LoRAs/RAG re-enable). Enabled by `_refresh_editor_state` when there's a
+target (history) AND a face (person or loaded image), and guards on the
+Kontext editor being installed/fitting.
+
+**Mode badges + tooltips** (v1.20.0) — two `ttk.Label` badges next to the
+VRAM meter (`lora_badge`/`rag_badge`, styles `BadgeOn.TLabel` green /
+`BadgeOff.TLabel` red) show whether each will actually apply next run.
+`_refresh_mode_badges`: LoRA green = ≥1 ticked AND not editing; RAG green =
+a map loaded AND not editing AND SDXL family (red on Flux). Repainted by
+`_refresh_editor_state` (buttons + badges) from every input change —
+ref load/clear, Use-selected, To-editor, person set/clear, model pick, map
+pick/clear, LoRA `<<ListboxSelect>>`, and `_refresh_models` (ghost pruning).
+Hover help is the module-level `Tooltip` (a borderless `Toplevel` on
+`<Enter>` after a delay, one visible at a time; frozen-exe-safe, no deps);
+`App._tip(widget, text)` attaches and retains them. The verbose IMAGE EDITOR
+header was trimmed to "(optional)" with the detail moved into its tooltip.
+The three primary Generate buttons share `Go.TButton` so they're one size.
 
 This is **not RAG** — no retrieval; one explicitly chosen picture goes
 straight through. Ages are computed at display time, never stored. The ℹ

@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.20.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2089,6 +2089,70 @@ class Generator:
 # main window
 # --------------------------------------------------------------------------
 
+class Tooltip:
+    """Lightweight hover help: a borderless popup after a short delay, gone on
+    leave or click. Dependency-free (a plain Toplevel) so it behaves the same
+    in the frozen exe as in source."""
+
+    _open = None   # only one tip visible at a time
+
+    def __init__(self, widget, text, delay=450):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tip = None
+        self._after = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self._unschedule()
+        try:
+            self._after = self.widget.after(self.delay, self._show)
+        except Exception:
+            self._after = None
+
+    def _unschedule(self):
+        if self._after:
+            try:
+                self.widget.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _show(self):
+        if self.tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except Exception:
+            return
+        if Tooltip._open is not None:
+            try:
+                Tooltip._open.destroy()
+            except Exception:
+                pass
+        self.tip = Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        ttk.Label(self.tip, text=self.text, style="Tip.TLabel",
+                  wraplength=300, justify="left").pack()
+        Tooltip._open = self.tip
+
+    def _hide(self, _e=None):
+        self._unschedule()
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            if Tooltip._open is self.tip:
+                Tooltip._open = None
+            self.tip = None
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -2128,6 +2192,7 @@ class App:
         self._build_ui()
         self._apply_ui_state(self.settings.get("ui", {}))
         self._refresh_models()     # disk scan — fills dropdowns before engine
+        self._refresh_editor_state()   # initial badge colours + button gating
         self._wire_autosave()      # every change saved as it happens
         self._schedule_persist()   # baseline save right away
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2238,6 +2303,14 @@ class App:
                     troughcolor=BG2)
         s.configure("TSpinbox", padding=4)
         s.configure("TFrame", background=BG)
+        # hover tooltips + the top-right mode badges
+        s.configure("Tip.TLabel", background="#33334a", foreground=FG,
+                    padding=(8, 5), relief="solid", borderwidth=1)
+        # green = the feature will apply to the next generation, red = it won't
+        s.configure("BadgeOn.TLabel", background=ACCENT2, foreground="#0d0d12",
+                    font=("Segoe UI", 9, "bold"), padding=(9, 3))
+        s.configure("BadgeOff.TLabel", background=ACCENT, foreground="white",
+                    font=("Segoe UI", 9, "bold"), padding=(9, 3))
 
     def _rule(self, parent, row):
         """A blue divider marking where one section of the panel ends and
@@ -2385,7 +2458,8 @@ class App:
         self.lora_list.configure(yscrollcommand=lsb.set)
         lsb.grid(row=0, column=1, sticky="ns")
         self.lora_list.bind("<<ListboxSelect>>",
-                            lambda _e: self._schedule_persist())
+                            lambda _e: (self._schedule_persist(),
+                                        self._refresh_mode_badges()))
         limprow = ttk.Frame(left); limprow.grid(row=r, sticky=NSEW,
                                                 pady=(2, 0)); r += 1
         ttk.Button(limprow, text="➕ Add LoRA file…",
@@ -2467,17 +2541,24 @@ class App:
 
         # image editor — Gemini-style instruction editing
         r = self._rule(left, r)
-        ttk.Label(left, text="IMAGE EDITOR (optional — load image(s) and "
-                             "your prompt edits them: change things, remove "
-                             "text, move characters to new scenes. While "
-                             "editing, presets, LoRAs and RAG maps are OFF — "
-                             "the images + instruction drive the result)",
-                  style="Head.TLabel", wraplength=400,
-                  justify="left").grid(row=r, sticky=W, pady=(8, 0)); r += 1
+        ed_head = ttk.Label(left, text="IMAGE EDITOR (optional)",
+                            style="Head.TLabel")
+        ed_head.grid(row=r, sticky=W, pady=(8, 0)); r += 1
+        self._tip(ed_head,
+                  "Load image(s) and your prompt edits them — change things, "
+                  "remove text, move characters into new scenes. While an "
+                  "image is loaded the app is in edit mode: presets, LoRAs and "
+                  "RAG maps are OFF (the images + your instruction drive the "
+                  "result), shown by the red LoRA/RAG badges top-right. Clear "
+                  "the image to return to normal generation.")
         rrow = ttk.Frame(left); rrow.grid(row=r, sticky=NSEW, pady=2); r += 1
         rrow.columnconfigure(1, weight=1)
-        ttk.Button(rrow, text="🖼 Load…", width=9,
-                   command=self._pick_ref).grid(row=0, column=0)
+        load_btn = ttk.Button(rrow, text="🖼 Load…", width=9,
+                              command=self._pick_ref)
+        load_btn.grid(row=0, column=0)
+        self._tip(load_btn,
+                  "Load image file(s) to edit with your prompt. A loaded image "
+                  "can also be the face for 🔀 Swap into selected.")
         self.ref_var = StringVar(value="none — text only")
         ttk.Label(rrow, textvariable=self.ref_var, style="Dim.TLabel",
                   wraplength=160).grid(row=0, column=1, sticky=W, padx=6)
@@ -2486,8 +2567,13 @@ class App:
             command=self._use_selected_for_editor)
         self.editor_use_btn.grid(row=0, column=2, padx=(0, 4))
         self.editor_use_btn.state(["disabled"])   # until history has images
-        ttk.Button(rrow, text="✕", width=3,
-                   command=self._clear_ref).grid(row=0, column=3)
+        self._tip(self.editor_use_btn,
+                  "Edit the picture currently selected in the gallery — the "
+                  "prompt becomes the edit instruction.")
+        clr_btn = ttk.Button(rrow, text="✕", width=3, command=self._clear_ref)
+        clr_btn.grid(row=0, column=3)
+        self._tip(clr_btn, "Clear the loaded image and leave edit mode "
+                           "(LoRAs and RAG turn back on).")
         # Reference database — a user-made SQLite of people (built with the
         # Actor DB Builder tool); the chosen person's photo is more context
         # for the model: it joins the editor's reference images when
@@ -2495,36 +2581,60 @@ class App:
         refdb = ttk.Frame(left); refdb.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
         refdb.columnconfigure(1, weight=1)
-        ttk.Button(refdb, text="📇 Reference DB…", width=16,
-                   command=self._pick_actordb).grid(row=0, column=0)
+        db_btn = ttk.Button(refdb, text="📇 Reference DB…", width=16,
+                            command=self._pick_actordb)
+        db_btn.grid(row=0, column=0)
+        self._tip(db_btn,
+                  "Load a people database you built with the Actor DB Builder "
+                  "tool (a portable SQLite of names and photos). Nothing ships "
+                  "with the app.")
         self.actordb_var = StringVar(value="none")
         ttk.Label(refdb, textvariable=self.actordb_var, style="Dim.TLabel",
                   wraplength=220).grid(row=0, column=1, sticky=W, padx=6)
-        ttk.Button(refdb, text="🗑 Remove", width=10,
-                   command=self._clear_actordb).grid(row=0, column=2)
-        ttk.Button(refdb, text="ℹ", width=3,
-                   command=self._refdb_info).grid(row=0, column=3)
+        dbrm_btn = ttk.Button(refdb, text="🗑 Remove", width=10,
+                              command=self._clear_actordb)
+        dbrm_btn.grid(row=0, column=2)
+        self._tip(dbrm_btn, "Unload the reference database.")
+        info_btn = ttk.Button(refdb, text="ℹ", width=3,
+                              command=self._refdb_info)
+        info_btn.grid(row=0, column=3)
+        self._tip(info_btn, "Explain which extras apply in each mode.")
         prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
         prow.columnconfigure(1, weight=1)
-        ttk.Button(prow, text="👤 Person…", width=16,
-                   command=self._pick_actor).grid(row=0, column=0)
+        person_btn = ttk.Button(prow, text="👤 Person…", width=16,
+                                command=self._pick_actor)
+        person_btn.grid(row=0, column=0)
+        self._tip(person_btn,
+                  "Pick a person from the loaded database. Their photo guides "
+                  "the face in plain SDXL generation (with your LoRAs and RAG "
+                  "still on), joins the editor when editing, or is the face "
+                  "for 🔀 Swap into selected.")
         self.actor_var = StringVar(value="no person selected")
         ttk.Label(prow, textvariable=self.actor_var, style="Dim.TLabel",
                   wraplength=150).grid(row=0, column=1, sticky=W, padx=6)
         self.actor_thumb_lab = ttk.Label(prow)
         self.actor_thumb_lab.grid(row=0, column=2, padx=(0, 4))
-        ttk.Button(prow, text="➡ To editor", width=11,
-                   command=self._actor_to_editor).grid(row=0, column=3)
+        toed_btn = ttk.Button(prow, text="➡ To editor", width=11,
+                              command=self._actor_to_editor)
+        toed_btn.grid(row=0, column=3)
+        self._tip(toed_btn,
+                  "Load this person's photo as an editor reference for a "
+                  "person-only edit (enters edit mode).")
         srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
         srow.columnconfigure(1, weight=1)
         self.swap_btn = ttk.Button(srow, text="🔀 Swap into selected",
                                    width=20, command=self._swap_person_in)
         self.swap_btn.grid(row=0, column=0)
-        self.swap_btn.state(["disabled"])   # until history has an image
-        ttk.Label(srow, text="put this person into the selected picture "
-                             "(Kontext, keeps the art)",
+        self.swap_btn.state(["disabled"])   # until a target + a face exist
+        self._tip(self.swap_btn,
+                  "Put a face into the selected picture with Flux Kontext, "
+                  "keeping the pose, framing, costume, lighting and art style. "
+                  "The face can be the Reference DB person or a loaded image — "
+                  "if both are available you'll be asked which. A loaded image "
+                  "used here is cleared afterwards, so LoRAs/RAG turn back on.")
+        ttk.Label(srow, text="face → selected picture",
                   style="Dim.TLabel", wraplength=230).grid(
             row=0, column=1, sticky=W, padx=6)
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
@@ -2540,10 +2650,17 @@ class App:
         self.editor_dd.bind("<<ComboboxSelected>>",
                             lambda _e: self._on_editor_pick())
         self._refresh_editor_list()
+        self._tip(self.editor_dd,
+                  "Which editor engine handles edits and swaps: Flux Kontext "
+                  "(best at keeping identity/style) or Qwen Image Edit. Swaps "
+                  "always use Kontext.")
         self.editor_canvas_var = BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Output at Canvas size",
-                        variable=self.editor_canvas_var).grid(
-            row=r, sticky=W); r += 1
+        canvas_cb = ttk.Checkbutton(left, text="Output at Canvas size",
+                                    variable=self.editor_canvas_var)
+        canvas_cb.grid(row=r, sticky=W); r += 1
+        self._tip(canvas_cb,
+                  "On: the edited/swapped result is rendered at the Canvas "
+                  "size above. Off: it keeps the source image's own size.")
         self.change_var = DoubleVar(value=60)   # border-ref influence
 
         # generate
@@ -2658,7 +2775,7 @@ class App:
         anrow = ttk.Frame(left); anrow.grid(row=r, sticky=NSEW,
                                             pady=(4, 2)); r += 1
         anrow.columnconfigure(0, weight=1)
-        ttk.Button(anrow, text="🎬 Generate animation",
+        ttk.Button(anrow, text="🎬 Generate animation", style="Go.TButton",
                    command=self._generate_animation).grid(row=0, column=0,
                                                           sticky="ew")
         ttk.Button(anrow, text="＋Q", width=4,
@@ -2768,7 +2885,7 @@ class App:
         borow = ttk.Frame(left); borow.grid(row=r, sticky=NSEW,
                                             pady=(4, 2)); r += 1
         borow.columnconfigure(0, weight=1)
-        ttk.Button(borow, text="⚡ Generate border",
+        ttk.Button(borow, text="⚡ Generate border", style="Go.TButton",
                    command=self._generate_border).grid(row=0, column=0,
                                                        sticky="ew")
         ttk.Button(borow, text="＋Q", width=4,
@@ -2822,9 +2939,23 @@ class App:
         right.columnconfigure(0, weight=1)
         right.rowconfigure(1, weight=1)
 
-        # live VRAM meter (top right): green bar = used / max MB
+        # top-right bar: LoRA/RAG mode badges + the live VRAM meter
         vrow = ttk.Frame(right)
         vrow.grid(row=0, column=0, sticky="e", pady=(0, 6))
+        self.lora_badge = ttk.Label(vrow, text="LoRA", style="BadgeOff.TLabel")
+        self.lora_badge.pack(side="left", padx=(0, 5))
+        self.rag_badge = ttk.Label(vrow, text="RAG", style="BadgeOff.TLabel")
+        self.rag_badge.pack(side="left", padx=(0, 16))
+        self._tip(self.lora_badge,
+                  "LoRA status. Green when at least one LoRA is ticked and it "
+                  "will apply to the next generation. Red while you are editing "
+                  "a loaded image (editors ignore LoRAs), when no LoRA is "
+                  "ticked, or on a model that can't use them.")
+        self._tip(self.rag_badge,
+                  "RAG map status. Green when a valid RAG map is loaded and "
+                  "will guide the next generation on an SDXL model. Red while "
+                  "editing a loaded image, when no map is loaded, or on a Flux "
+                  "model (RAG image guidance needs SDXL).")
         self.vram_label_var = StringVar(
             value="GPU — MB" if self.vram_gb is not None
             else "no NVIDIA GPU")
@@ -2960,6 +3091,7 @@ class App:
             self.status_var.set(
                 f"RAG map '{rag.get('name', '')}' loaded — its example "
                 "images will guide generations on SDXL models.")
+        self._refresh_mode_badges()
         self._schedule_persist()
 
     # ------------------------------------------------ reference database
@@ -3101,6 +3233,7 @@ class App:
         self.status_var.set("Photo added to the editor — the prompt is now "
                             "an edit instruction (presets/LoRAs/RAG are "
                             "off while editing).")
+        self._refresh_editor_state()
         self._schedule_persist()
 
     def _actordb_rows(self):
@@ -3129,6 +3262,7 @@ class App:
             self.actor_var.set("no person selected")
             self.actor_thumb_lab.configure(image="")
             self._actor_thumb = None
+            self._refresh_editor_state()
             self._schedule_persist()
             return
         age = self._actor_age(row.get("birth_date"), row.get("death_date"))
@@ -3148,6 +3282,7 @@ class App:
                 self.actor_thumb_lab.configure(image=self._actor_thumb)
             except Exception:
                 pass
+        self._refresh_editor_state()
         self._schedule_persist()
 
     def _pick_actor(self):
@@ -3389,6 +3524,7 @@ class App:
         elif had:
             self.status_var.set(f"RAG map removed — {Path(had).name} is no "
                                 "longer guiding generations.")
+        self._refresh_mode_badges()
         self._schedule_persist()
 
     def _ragmap_label(self, rag, path):
@@ -4142,6 +4278,7 @@ class App:
             self._last_fit_display = self.model_var.get()
         self._update_model_entry_style()
         self._refresh_preset_list()
+        self._refresh_mode_badges()   # RAG validity depends on the model family
 
     def _use_example(self):
         p = self._preset()
@@ -4269,6 +4406,7 @@ class App:
                 + ", ".join(sorted(ghosts)))
             self._schedule_persist()
         self._validate_ragmap()
+        self._refresh_mode_badges()   # model/LoRA/map set may have changed
 
     def _pick_ref(self):
         paths = filedialog.askopenfilenames(filetypes=[
@@ -4281,11 +4419,13 @@ class App:
                              f"{len(self.ref_paths)} images ({first}, …)")
             self.status_var.set("Reference(s) loaded — 'Change amount' sets "
                                 "how strongly the AI transforms them.")
+            self._refresh_editor_state()
             self._schedule_persist()
 
     def _clear_ref(self):
         self.ref_paths = []
         self.ref_var.set("none — text only")
+        self._refresh_editor_state()
         self._schedule_persist()
 
     def _pick_border_refs(self):
@@ -4429,75 +4569,161 @@ class App:
         self.status_var.set(f"Editor now works on the selected image "
                             f"({Path(path).name}) — the prompt is the "
                             "instruction.")
+        self._refresh_editor_state()
         self._schedule_persist()
 
+    def _ask_swap_source(self):
+        """Both a Reference DB person and a loaded image can be the face to
+        swap in — ask which. Returns 'db', 'loaded', or None if cancelled."""
+        dlg = Toplevel(self.root)
+        dlg.title("Swap which face in?")
+        dlg.configure(bg=BG)
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        ttk.Label(dlg, text="Put which face into the selected picture?",
+                  style="Head.TLabel").pack(padx=18, pady=(16, 12))
+        choice = {"v": None}
+
+        def pick(v):
+            choice["v"] = v
+            dlg.destroy()
+
+        brow = ttk.Frame(dlg)
+        brow.pack(padx=18, pady=(0, 16))
+        ttk.Button(brow, text="👤 Reference DB person", width=22,
+                   command=lambda: pick("db")).pack(side="left", padx=6)
+        ttk.Button(brow, text="🖼 Loaded image", width=18,
+                   command=lambda: pick("loaded")).pack(side="left", padx=6)
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + \
+            (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + \
+            (self.root.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.grab_set()
+        self.root.wait_window(dlg)
+        return choice["v"]
+
     def _swap_person_in(self):
-        """One click: send the selected picture + the chosen person to Kontext
-        with a ready-made 'replace the person, keep everything else' prompt, so
-        a LoRA/RAG-built body becomes that specific person without redrawing the
-        art. Bypasses presets/LoRAs/RAG like any edit — the styling is already
-        baked into the picture being edited."""
+        """One click: put a face — the Reference DB person OR a loaded editor
+        image — into the selected picture with Flux Kontext, keeping the pose,
+        framing, costume, lighting and art style. The styling is already baked
+        into the picture being edited, so this runs as an edit (presets/LoRAs/
+        RAG off). A loaded image used here is cleared afterwards, dropping the
+        app back to normal generation (LoRAs/RAG on again)."""
         if self._busy_guard():
             return
         if not engine_alive():
             messagebox.showerror("Engine", "Engine is not running yet.")
             return
-        if not self.actor_sel:
-            messagebox.showinfo("Swap person in",
-                                "Pick a person first (👤 Person…).")
-            return
         if self.current is None or not self.session:
-            messagebox.showinfo("Swap person in",
-                                "Generate or select a picture to swap the "
-                                "person into first.")
+            messagebox.showinfo("Swap into selected",
+                                "Generate or select a picture to swap a face "
+                                "into first.")
             return
         img, _params, path = self.session[self.current]
         if str(path).lower().endswith(".gif"):
             self.status_var.set("Pick a still image to swap into — GIFs can't "
                                 "be edited directly.")
             return
-        person = self._actor_ref_path()
-        if not person:
-            messagebox.showinfo("Swap person in",
-                                "This person has no photo in the database.")
+
+        # the face to put in: the DB person, a loaded image, or (if both) ask
+        person = self._actor_ref_path()             # DB person photo or None
+        loaded = self.ref_paths[0] if self.ref_paths else None
+        if person and loaded:
+            which = self._ask_swap_source()
+            if which is None:
+                return
+            source = person if which == "db" else loaded
+            label = "the Reference DB person" if which == "db" \
+                else Path(loaded).name
+        elif person:
+            source, label = person, "the Reference DB person"
+        elif loaded:
+            source, label = loaded, Path(loaded).name
+        else:
+            messagebox.showinfo(
+                "Swap into selected",
+                "Choose a face to swap in first — pick a person (👤 Person…) "
+                "or load an image (🖼 Load…).")
             return
+
         # Kontext is the identity-preserving editor; make sure it can run.
         if not self._ensure_editor_ready("kontext"):
             return
+
+        # the loaded editor image is consumed by the swap: clear it so the app
+        # returns to normal generation (LoRAs/RAG come back on).
+        if self.ref_paths:
+            self.ref_paths = []
+            self.ref_var.set("none — text only")
+        self._refresh_editor_state()
 
         try:
             iw, ih = img.size
         except Exception:
             iw, ih = SIZE_PRESETS[self.size_var.get()]
         params = dict(
-            prompt=SWAP_PERSON_PROMPT, user_prompt="swap person in",
+            prompt=SWAP_PERSON_PROMPT, user_prompt="swap face in",
             style="", negative="", model="editor:kontext",
             loras=[], width=iw, height=ih, seed=0, steps=None, cfg=None,
             batch=1, random_seed=False, transparent=False, upscale=False,
             preset=self.preset_var.get(),
-            ref_images=[str(path), person],
+            ref_images=[str(path), source],
             rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
             editor="kontext",
             out_size=(iw, ih) if self.editor_canvas_var.get() else None,
             denoise=1.0)
 
-        self.status_var.set(
-            f"Swapping {self.actor_sel.get('first_name', '')} "
-            f"{self.actor_sel.get('last_name', '')}".strip()
-            + " into the selected picture with Flux Kontext…")
+        self.status_var.set(f"Swapping {label} into the selected picture "
+                            "with Flux Kontext…")
         CANCEL.clear()
         self.busy = True
         self.go_btn.state(["disabled"])
         self.progress["value"] = 0
+        self._schedule_persist()
         gen = Generator(self.ui_queue)
         threading.Thread(target=gen.run, args=(params,), daemon=True).start()
 
-    def _update_editor_btn(self):
-        has_history = bool(self.session)
-        state = "!disabled" if has_history else "disabled"
-        self.editor_use_btn.state([state])
+    def _tip(self, widget, text):
+        """Attach a hover tooltip and keep a reference so it isn't collected."""
+        if not hasattr(self, "_tooltips"):
+            self._tooltips = []
+        self._tooltips.append(Tooltip(widget, text))
+
+    def _refresh_mode_badges(self):
+        """Colour the top-right LoRA/RAG badges: green only when each will
+        actually affect the next generation, red otherwise (editing a loaded
+        image, nothing selected/loaded, or a model that can't use it)."""
+        if not hasattr(self, "lora_badge"):
+            return
+        editing = bool(self.ref_paths)
+        model = self._model_raw()
+        fam = model_family(model) if model else ""
+        sdxl = bool(fam) and fam not in ("flux", "schnell")
+        lora_on = (not editing) and bool(self._selected_loras())
+        rag_on = (not editing) and (self.ragmap is not None) and sdxl
+        self.lora_badge.configure(
+            style="BadgeOn.TLabel" if lora_on else "BadgeOff.TLabel")
+        self.rag_badge.configure(
+            style="BadgeOn.TLabel" if rag_on else "BadgeOff.TLabel")
+
+    def _refresh_editor_state(self):
+        """After anything that changes the editor's inputs: enable/disable the
+        editor buttons and repaint the mode badges. Swap needs a target (a
+        history image) AND a face (a DB person or a loaded image)."""
+        has_target = bool(self.session)
+        if hasattr(self, "editor_use_btn"):
+            self.editor_use_btn.state(
+                ["!disabled"] if has_target else ["disabled"])
         if hasattr(self, "swap_btn"):
-            self.swap_btn.state([state])
+            has_source = bool(self.actor_sel) or bool(self.ref_paths)
+            self.swap_btn.state(
+                ["!disabled"] if (has_target and has_source) else ["disabled"])
+        self._refresh_mode_badges()
+
+    def _update_editor_btn(self):
+        self._refresh_editor_state()
 
     def _reuse_seed(self):
         if self.session:
