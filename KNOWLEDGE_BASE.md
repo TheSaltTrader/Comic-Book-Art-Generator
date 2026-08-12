@@ -215,8 +215,19 @@ gated and not used.
   image path, so the guidance is equivalent — the source pictures simply
   never existed as files here. `IPAdapterEmbeds` needs either a
   `clip_vision` or a `neg_embed`; the UnifiedLoader bundles clip_vision, so
-  passing only `pos_embed` is valid. The two paths are mutually exclusive
-  and selected by `ragmap["_embeds_only"]`.
+  passing only `pos_embed` is valid. The map itself is one layout or the
+  other, selected by `ragmap["_embeds_only"]`.
+
+**Chaining both sources (v1.19.0):** images and embeds can now steer the same
+generation — used when an embeddings-only ("private") RAG map and a Reference
+DB person are both active. A **single** `IPAdapterUnifiedLoader` (node `50`)
+feeds both stages: `IPAdapterEmbeds` (`59`) applies `model[50,0]`→`model`, then
+the basic `IPAdapter` (`51`) takes that `model[59,0]`, reusing the same adapter
+output `[50,1]`. One loader + one clip_vision drive both, so there is no
+node-`50` collision (two loaders would cross-reference and cycle). `build_graph`
+runs the embeds block first, then the image block, off whichever `model_ref` the
+prior block produced; either source alone builds the exact graph it did before.
+Validated on a live engine (real SDXL render, embeds + person). SDXL only.
   **GOTCHA (v1.16.1, caught only by a live engine run):** `IPAdapterEmbeds`
   is an ADVANCED node — its `weight_type` list is `WEIGHT_TYPES` (`linear`,
   `ease in/out`, `style transfer`, …) and does NOT contain `"standard"`, which
@@ -297,6 +308,45 @@ when Ollama is absent: `ollama_models()` returns `[]` on any failure and
 the button explains itself once. Clean the reply: strip `<think>` blocks
 (reasoning models), "Sure, here's…" lead-ins, quotes and bullets, and
 reject anything shorter than half the original as a non-answer.
+
+**Reference database** (v1.18.0, lives in the Image editor section) — a
+portable SQLite database of people the **user builds** with the separate
+*Actor DB Builder* tool (nothing ships with the app); schema
+`actor(imdb_id, first_name, last_name, birth_date, death_date, sex,
+headshot BLOB, …)` + `meta(format='cbac-actordb-1')`. The app opens it
+**read-only** (`file:…?mode=ro`), never holds a connection (open → query
+→ close per call), and validates the `meta.format` prefix. The picker
+dialog is sortable on every column and searchable. The chosen person's
+photo BLOB is written to a temp JPEG at generation time and routed
+**context-aware**:
+
+- *editing* (`editing == bool(ref_paths)`): appended to `ref_images`
+  exactly like a hand-loaded reference, cap-aware (Kontext stitches ≤4,
+  Qwen `image1-3` ≤3 — over the cap the photo is left out with a status
+  note). `➡ To editor` pushes the temp JPEG into `self.ref_paths`
+  directly for person-only edits.
+- *plain generation*: appended to `rag_ref_paths`, riding the LoadImage →
+  basic IPAdapter path (§4); SDXL-only like every image ref. If an
+  embeddings-only RAG map is active too, both now guide the run — the
+  person's photo and the map's embeds **chain on one IP-Adapter** (§4,
+  v1.19.0) instead of the person replacing the map.
+
+**One-click swap** (v1.19.0, `_swap_person_in`, 🔀 Swap into selected) —
+sends the selected history image + the chosen person to Flux **Kontext**
+with the canned `SWAP_PERSON_PROMPT` ("replace the person, keep pose /
+framing / costume / lighting / art style"), forcing `editor:kontext` and
+`ref_images = [selected, person]` and keeping the source picture's size.
+It reuses `build_kontext_graph` (the same 2-image stitch the multi-ref
+editor uses) and, like all editing, bypasses presets/LoRAs/RAG — the
+styling is already baked into the picture being edited. The button enables
+once history has a still image (`_update_editor_btn`) and guards on a
+person being selected and the Kontext editor being installed/fitting.
+
+This is **not RAG** — no retrieval; one explicitly chosen picture goes
+straight through. Ages are computed at display time, never stored. The ℹ
+button (`_refdb_info`) carries the user-facing what-uses-what matrix:
+editing bypasses presets/LoRAs/RAG maps, plain generation keeps them and
+can combine LoRAs + RAG + a person in one pass.
 
 ---
 

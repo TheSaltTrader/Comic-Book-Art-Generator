@@ -18,6 +18,7 @@ import os
 import re
 import random
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.19.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -1209,71 +1210,76 @@ def build_graph(p):
                   "inputs": {"guidance": 3.5, "conditioning": pos_ref}}
         pos_ref = ["4", 0]
 
-    # style reference (IP-Adapter): the refs teach the model a look, the
-    # prompt keeps full control of the composition — SDXL families only
-    if p.get("style_ref_names"):
-        img_ref, nid, bid = None, 31, 41
-        for name in p["style_ref_names"][:6]:
-            g[str(nid)] = {"class_type": "LoadImage",
-                           "inputs": {"image": name}}
-            if img_ref is None:
-                img_ref = [str(nid), 0]
-            else:
-                g[str(bid)] = {"class_type": "ImageBatch",
-                               "inputs": {"image1": img_ref,
-                                          "image2": [str(nid), 0]}}
-                img_ref = [str(bid), 0]
-                bid += 1
-            nid += 1
+    # style reference via IP-Adapter (SDXL families only). Two sources can
+    # now travel together, chained model→model off ONE UnifiedLoader:
+    #   • image refs (style_ref_names): RAG-map example images and/or a
+    #     Reference-DB person photo — applied with the basic IPAdapter node.
+    #   • precomputed embeds (style_embed_names): an embeddings-only ("private")
+    #     RAG map whose .ipadpt files are CLIP penultimate hidden states.
+    # A single loader means one adapter + one clip_vision feed both stages, so
+    # a private map and a face guide can steer the same generation without the
+    # node-50 collision two loaders would cause. Either source alone builds the
+    # exact graph it did before.
+    style_imgs = p.get("style_ref_names")
+    style_embeds = p.get("style_embed_names")
+    if style_imgs or style_embeds:
         g["50"] = {"class_type": "IPAdapterUnifiedLoader",
                    "inputs": {"preset": "PLUS (high strength)",
                               "model": model_ref}}
-        g["51"] = {"class_type": "IPAdapter",
-                   "inputs": {"model": ["50", 0], "ipadapter": ["50", 1],
-                              "image": img_ref,
-                              "weight": p.get("style_weight", 0.8),
-                              "start_at": 0.0, "end_at": 1.0,
-                              "weight_type": p.get("ref_weight_type",
-                                                   "standard")}}
-        model_ref = ["51", 0]
+        adapter_ref = ["50", 1]
+        model_ref = ["50", 0]
 
-    # embeddings-only RAG map: the references arrive as precomputed IP-Adapter
-    # "PLUS" embeds (.ipadpt = CLIP penultimate hidden states) rather than
-    # images, so there is nothing to LoadImage/encode — load each embed and
-    # combine them, then apply with IPAdapterEmbeds. Same PLUS adapter the
-    # image path uses, so the guidance is equivalent; the pictures just never
-    # existed as files here.
-    elif p.get("style_embed_names"):
-        names = p["style_embed_names"][:5]   # IPAdapterCombineEmbeds takes ≤5
-        g["50"] = {"class_type": "IPAdapterUnifiedLoader",
-                   "inputs": {"preset": "PLUS (high strength)",
-                              "model": model_ref}}
-        load_ids = []
-        lid = 52
-        for nm in names:
-            g[str(lid)] = {"class_type": "IPAdapterLoadEmbeds",
-                           "inputs": {"embeds": nm}}
-            load_ids.append(str(lid))
-            lid += 1
-        combine_inputs = {"method": "concat"}
-        for idx, s in enumerate(load_ids, start=1):
-            combine_inputs[f"embed{idx}"] = [s, 0]
-        g["58"] = {"class_type": "IPAdapterCombineEmbeds",
-                   "inputs": combine_inputs}
-        g["59"] = {"class_type": "IPAdapterEmbeds",
-                   "inputs": {"model": ["50", 0], "ipadapter": ["50", 1],
-                              "pos_embed": ["58", 0],
-                              "weight": p.get("style_weight", 0.8),
-                              # IPAdapterEmbeds is an ADVANCED node: its
-                              # weight_type is WEIGHT_TYPES (linear, ease…,
-                              # style transfer) and has NO "standard" (that is
-                              # only on the basic IPAdapter node the image path
-                              # uses). "linear" is the advanced-node equivalent
-                              # of standard uniform weighting.
-                              "weight_type": "linear",
-                              "start_at": 0.0, "end_at": 1.0,
-                              "embeds_scaling": "V only"}}
-        model_ref = ["59", 0]
+        # embeds first: load each .ipadpt, concat (≤5), apply with the ADVANCED
+        # IPAdapterEmbeds node. Its weight_type is WEIGHT_TYPES (linear, ease…,
+        # style transfer) with NO "standard" — that lives only on the basic
+        # IPAdapter node below; "linear" is the advanced-node equivalent of
+        # standard uniform weighting.
+        if style_embeds:
+            load_ids = []
+            lid = 52
+            for nm in style_embeds[:5]:
+                g[str(lid)] = {"class_type": "IPAdapterLoadEmbeds",
+                               "inputs": {"embeds": nm}}
+                load_ids.append(str(lid))
+                lid += 1
+            combine_inputs = {"method": "concat"}
+            for idx, s in enumerate(load_ids, start=1):
+                combine_inputs[f"embed{idx}"] = [s, 0]
+            g["58"] = {"class_type": "IPAdapterCombineEmbeds",
+                       "inputs": combine_inputs}
+            g["59"] = {"class_type": "IPAdapterEmbeds",
+                       "inputs": {"model": model_ref, "ipadapter": adapter_ref,
+                                  "pos_embed": ["58", 0],
+                                  "weight": p.get("style_weight", 0.8),
+                                  "weight_type": "linear",
+                                  "start_at": 0.0, "end_at": 1.0,
+                                  "embeds_scaling": "V only"}}
+            model_ref = ["59", 0]
+
+        # image refs next: LoadImage (batched if several) into the basic
+        # IPAdapter node, stacked on whatever the embeds stage produced.
+        if style_imgs:
+            img_ref, nid, bid = None, 31, 41
+            for name in style_imgs[:6]:
+                g[str(nid)] = {"class_type": "LoadImage",
+                               "inputs": {"image": name}}
+                if img_ref is None:
+                    img_ref = [str(nid), 0]
+                else:
+                    g[str(bid)] = {"class_type": "ImageBatch",
+                                   "inputs": {"image1": img_ref,
+                                              "image2": [str(nid), 0]}}
+                    img_ref = [str(bid), 0]
+                    bid += 1
+                nid += 1
+            g["51"] = {"class_type": "IPAdapter",
+                       "inputs": {"model": model_ref, "ipadapter": adapter_ref,
+                                  "image": img_ref,
+                                  "weight": p.get("style_weight", 0.8),
+                                  "start_at": 0.0, "end_at": 1.0,
+                                  "weight_type": p.get("ref_weight_type",
+                                                       "standard")}}
+            model_ref = ["51", 0]
 
     denoise = 1.0
     latent_ref = ["5", 0]
@@ -1381,6 +1387,15 @@ BORDER_CLEAN_PROMPT = (
     "creatures, no objects, no scenery and no text in the middle. Keep "
     "the decorative border frame around the edges exactly as it is, "
     "unchanged. Only empty out the center.")
+# One-click "Swap into selected": image 1 is the generated art, image 2 is the
+# person's photo. Kontext keeps the scene and restyles the face to match, so a
+# LoRA/RAG-built body becomes that specific person without touching the art.
+SWAP_PERSON_PROMPT = (
+    "Replace the person in the first image with the person shown in the "
+    "second image. Keep the first image's exact pose, body, clothing, "
+    "framing, background, lighting, colors and art style — change only the "
+    "face and identity so it clearly becomes the person from the second "
+    "image. Match that art style; do not make the face photographic.")
 BORDER_SAME_MODEL = "Same as main (default)"
 BORDER_LORA_FILE = "SDXL_BorderFrames_v1.safetensors"
 BORDER_TRIGGER = "cbacframe"
@@ -2093,6 +2108,9 @@ class App:
         self._batch_active = False
         self.ragmap = None         # loaded RAG map (dict) or None
         self.ragmap_path = None
+        self.actordb_path = None   # actor DB (SQLite from Actor DB Builder)
+        self.actor_sel = None      # selected actor (dict) or None
+        self._actor_thumb = None   # Tk image ref for the small headshot
         self._ollama_models = []   # models found in a local Ollama, if any
         self._want_ollama_model = ""   # the one restored from settings
         self._auto_negative = None  # last negative set by a preset (vs typed)
@@ -2451,7 +2469,9 @@ class App:
         r = self._rule(left, r)
         ttk.Label(left, text="IMAGE EDITOR (optional — load image(s) and "
                              "your prompt edits them: change things, remove "
-                             "text, move characters to new scenes)",
+                             "text, move characters to new scenes. While "
+                             "editing, presets, LoRAs and RAG maps are OFF — "
+                             "the images + instruction drive the result)",
                   style="Head.TLabel", wraplength=400,
                   justify="left").grid(row=r, sticky=W, pady=(8, 0)); r += 1
         rrow = ttk.Frame(left); rrow.grid(row=r, sticky=NSEW, pady=2); r += 1
@@ -2468,6 +2488,45 @@ class App:
         self.editor_use_btn.state(["disabled"])   # until history has images
         ttk.Button(rrow, text="✕", width=3,
                    command=self._clear_ref).grid(row=0, column=3)
+        # Reference database — a user-made SQLite of people (built with the
+        # Actor DB Builder tool); the chosen person's photo is more context
+        # for the model: it joins the editor's reference images when
+        # editing, and face-guides plain SDXL generations via IP-Adapter
+        refdb = ttk.Frame(left); refdb.grid(row=r, sticky=NSEW, pady=(2, 0))
+        r += 1
+        refdb.columnconfigure(1, weight=1)
+        ttk.Button(refdb, text="📇 Reference DB…", width=16,
+                   command=self._pick_actordb).grid(row=0, column=0)
+        self.actordb_var = StringVar(value="none")
+        ttk.Label(refdb, textvariable=self.actordb_var, style="Dim.TLabel",
+                  wraplength=220).grid(row=0, column=1, sticky=W, padx=6)
+        ttk.Button(refdb, text="🗑 Remove", width=10,
+                   command=self._clear_actordb).grid(row=0, column=2)
+        ttk.Button(refdb, text="ℹ", width=3,
+                   command=self._refdb_info).grid(row=0, column=3)
+        prow = ttk.Frame(left); prow.grid(row=r, sticky=NSEW, pady=(2, 0))
+        r += 1
+        prow.columnconfigure(1, weight=1)
+        ttk.Button(prow, text="👤 Person…", width=16,
+                   command=self._pick_actor).grid(row=0, column=0)
+        self.actor_var = StringVar(value="no person selected")
+        ttk.Label(prow, textvariable=self.actor_var, style="Dim.TLabel",
+                  wraplength=150).grid(row=0, column=1, sticky=W, padx=6)
+        self.actor_thumb_lab = ttk.Label(prow)
+        self.actor_thumb_lab.grid(row=0, column=2, padx=(0, 4))
+        ttk.Button(prow, text="➡ To editor", width=11,
+                   command=self._actor_to_editor).grid(row=0, column=3)
+        srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=(2, 0))
+        r += 1
+        srow.columnconfigure(1, weight=1)
+        self.swap_btn = ttk.Button(srow, text="🔀 Swap into selected",
+                                   width=20, command=self._swap_person_in)
+        self.swap_btn.grid(row=0, column=0)
+        self.swap_btn.state(["disabled"])   # until history has an image
+        ttk.Label(srow, text="put this person into the selected picture "
+                             "(Kontext, keeps the art)",
+                  style="Dim.TLabel", wraplength=230).grid(
+            row=0, column=1, sticky=W, padx=6)
         erow = ttk.Frame(left); erow.grid(row=r, sticky=NSEW, pady=(0, 4)); r += 1
         erow.columnconfigure(1, weight=1)
         ttk.Label(erow, text="Editor", style="Dim.TLabel").grid(row=0,
@@ -2903,6 +2962,362 @@ class App:
                 "images will guide generations on SDXL models.")
         self._schedule_persist()
 
+    # ------------------------------------------------ reference database
+    # A portable SQLite file the USER builds with the Actor DB Builder
+    # tool (nothing ships with the app): actor(imdb_id, first_name,
+    # last_name, birth_date, death_date, sex, headshot BLOB…) +
+    # meta(format='cbac-actordb-1'). The chosen person's photo is extra
+    # context for the model: while editing it joins the editor's
+    # reference images (Kontext/Qwen see it); on plain generations it
+    # face-guides via IP-Adapter (SDXL only). Not RAG — no retrieval.
+
+    @staticmethod
+    def _actor_age(birth, death=None):
+        if not birth:
+            return None
+        try:
+            b = [int(x) for x in str(birth).split("-")]
+            while len(b) < 3:
+                b.append(1)
+            if death:
+                d = [int(x) for x in str(death).split("-")]
+                while len(d) < 3:
+                    d.append(1)
+                end = datetime(*d)
+            else:
+                end = datetime.now()
+            return end.year - b[0] - ((end.month, end.day) < (b[1], b[2]))
+        except Exception:
+            return None
+
+    def _load_actordb(self, path, quiet=False):
+        """Open and validate an actor DB; returns the row count or None."""
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                fmt = conn.execute(
+                    "SELECT value FROM meta WHERE key='format'").fetchone()
+                n = conn.execute("SELECT COUNT(*) FROM actor").fetchone()[0]
+            finally:
+                conn.close()
+        except Exception as e:
+            if not quiet:
+                messagebox.showerror(
+                    "Reference DB", f"Could not read this database: {e}")
+            return None
+        if not fmt or not str(fmt[0]).startswith("cbac-actordb"):
+            if not quiet and not messagebox.askyesno(
+                    "Reference DB",
+                    "This file wasn't made by Actor DB Builder — it may "
+                    "still work if it has the same actor table.\n\nUse it "
+                    "anyway?"):
+                return None
+        self.actordb_path = str(path)
+        self.actordb_var.set(f"{Path(path).name} — {n} people")
+        return n
+
+    def _pick_actordb(self):
+        path = filedialog.askopenfilename(
+            title="Load reference database (made with Actor DB Builder)",
+            filetypes=[("Reference DB", "*.sqlite *.db"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        n = self._load_actordb(path)
+        if n is None:
+            return
+        self.actor_sel = None
+        self.actor_var.set("no person selected")
+        self.actor_thumb_lab.configure(image="")
+        self._actor_thumb = None
+        if n and not self._style_support_ok():
+            if messagebox.askyesno(
+                    "Enable image guidance",
+                    "On plain generations the person's photo guides via "
+                    "IP-Adapter, which isn't set up yet (a ~1 GB one-time "
+                    "download).\n\nInstall it now? (Editing needs nothing "
+                    "extra — the editor sees the photo directly.)"):
+                threading.Thread(target=self._install_style_support,
+                                 daemon=True).start()
+        self.status_var.set(f"Reference database loaded ({n} people) — "
+                            "pick one with 👤 Person… (ℹ explains how the "
+                            "photo is used).")
+        self._schedule_persist()
+
+    def _clear_actordb(self):
+        self.actordb_path = None
+        self.actor_sel = None
+        self.actordb_var.set("none")
+        self.actor_var.set("no person selected")
+        self.actor_thumb_lab.configure(image="")
+        self._actor_thumb = None
+        self.status_var.set("Reference database removed.")
+        self._schedule_persist()
+
+    def _refdb_info(self):
+        """The what-uses-what matrix — which extras apply in each mode."""
+        messagebox.showinfo(
+            "How your extras apply",
+            "PLAIN GENERATION (no editor images):\n"
+            "  • Style preset + ticked LoRAs — APPLIED\n"
+            "  • RAG map — APPLIED (SDXL: image guidance; Flux: skipped)\n"
+            "  • Reference DB person — face guidance via IP-Adapter\n"
+            "    (SDXL models only)\n"
+            "  • LoRAs + RAG + person combine: the LoRAs and RAG map build\n"
+            "    the styled body/scene and the person face-guides it, all in\n"
+            "    one pass. A private (embeds-only) map and a person now chain\n"
+            "    on one IP-Adapter instead of the person replacing the map.\n\n"
+            "IMAGE EDITING (editor image(s) loaded, or ➡ To editor):\n"
+            "  • Your prompt becomes the edit instruction\n"
+            "  • Style preset, LoRAs and RAG map — NOT applied\n"
+            "    (the Kontext/Qwen editors don't use them)\n"
+            "  • Reference DB person — the photo is handed to the editor\n"
+            "    as context, so it can draw that person into the result\n"
+            "  • 🔀 Swap into selected — one click sends the selected image\n"
+            "    plus the chosen person to Kontext with a ready-made\n"
+            "    'replace the person, keep everything else' instruction\n\n"
+            "Tip: for LoRA-styled fresh art guided by a face, select the "
+            "person and generate WITHOUT editor images on an SDXL model. "
+            "To restyle or stage the person directly, use ➡ To editor and "
+            "write the instruction.")
+
+    def _actor_to_editor(self):
+        """Load the chosen person's photo into the editor's references —
+        exactly as if it had been loaded with 🖼 Load…"""
+        if not self.actor_sel:
+            messagebox.showinfo("Reference DB",
+                                "Pick a person first (👤 Person…).")
+            return
+        ap = self._actor_ref_path()
+        if not ap:
+            messagebox.showinfo("Reference DB",
+                                "This person has no photo in the database.")
+            return
+        if ap not in self.ref_paths:
+            self.ref_paths.append(ap)
+        first = Path(self.ref_paths[0]).name
+        self.ref_var.set(first if len(self.ref_paths) == 1 else
+                         f"{len(self.ref_paths)} images ({first}, …)")
+        self.status_var.set("Photo added to the editor — the prompt is now "
+                            "an edit instruction (presets/LoRAs/RAG are "
+                            "off while editing).")
+        self._schedule_persist()
+
+    def _actordb_rows(self):
+        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in conn.execute(
+                "SELECT imdb_id, first_name, last_name, birth_date, "
+                "death_date, sex FROM actor")]
+        finally:
+            conn.close()
+
+    def _actor_headshot(self, imdb_id):
+        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True)
+        try:
+            r = conn.execute("SELECT headshot FROM actor WHERE imdb_id=?",
+                             (imdb_id,)).fetchone()
+            return r[0] if r and r[0] else None
+        finally:
+            conn.close()
+
+    def _set_actor(self, row):
+        """row = dict from _actordb_rows, or None to clear the choice."""
+        self.actor_sel = row
+        if not row:
+            self.actor_var.set("no person selected")
+            self.actor_thumb_lab.configure(image="")
+            self._actor_thumb = None
+            self._schedule_persist()
+            return
+        age = self._actor_age(row.get("birth_date"), row.get("death_date"))
+        bits = [b for b in (row.get("sex"),
+                            str(age) if age is not None else None) if b]
+        self.actor_var.set(
+            f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
+            + (f"  ({', '.join(bits)})" if bits else ""))
+        self._actor_thumb = None
+        self.actor_thumb_lab.configure(image="")
+        shot = self._actor_headshot(row["imdb_id"])
+        if shot:
+            try:
+                img = Image.open(BytesIO(shot))
+                img.thumbnail((48, 48), Image.LANCZOS)
+                self._actor_thumb = ImageTk.PhotoImage(img)
+                self.actor_thumb_lab.configure(image=self._actor_thumb)
+            except Exception:
+                pass
+        self._schedule_persist()
+
+    def _pick_actor(self):
+        """Sortable picker over the loaded actor DB, with a headshot
+        preview — click a column header to sort it, click again to flip."""
+        if not self.actordb_path or not Path(self.actordb_path).exists():
+            messagebox.showinfo("Reference DB",
+                                "Load a reference database first "
+                                "(📇 Reference DB…).")
+            return
+        try:
+            rows = self._actordb_rows()
+        except Exception as e:
+            messagebox.showerror("Reference DB",
+                                 f"Could not read the database: {e}")
+            return
+        by_id = {r["imdb_id"]: r for r in rows}
+
+        dlg = Toplevel(self.root)
+        dlg.title("Choose person")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry("760x460")
+        srow = ttk.Frame(dlg, padding=(8, 8, 8, 0))
+        srow.pack(fill="x")
+        ttk.Label(srow, text="🔍 Search").pack(side="left")
+        search_var = StringVar()
+        ttk.Entry(srow, textvariable=search_var).pack(
+            side="left", fill="x", expand=True, padx=6)
+        frame = ttk.Frame(dlg, padding=8)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        cols = ("first", "last", "age", "sex", "born", "died")
+        heads = {"first": "First name", "last": "Last name", "age": "Age",
+                 "sex": "Sex", "born": "Born", "died": "Died"}
+        tree = ttk.Treeview(frame, columns=cols, show="headings",
+                            selectmode="browse")
+        widths = {"first": 110, "last": 140, "age": 45, "sex": 60,
+                  "born": 85, "died": 85}
+        for c in cols:
+            tree.column(c, width=widths[c],
+                        anchor="w" if c in ("first", "last") else "center")
+        tree.grid(row=0, column=0, sticky=NSEW)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
+        state = {"col": "last", "desc": False}
+
+        def repopulate():
+            tree.delete(*tree.get_children(""))
+            needle = search_var.get().strip().lower()
+            for r_ in rows:
+                full = (f"{r_.get('first_name') or ''} "
+                        f"{r_.get('last_name') or ''}").lower()
+                if needle and needle not in full:
+                    continue
+                age = self._actor_age(r_.get("birth_date"),
+                                      r_.get("death_date"))
+                tree.insert("", END, iid=r_["imdb_id"],
+                            values=(r_.get("first_name") or "",
+                                    r_.get("last_name") or "",
+                                    age if age is not None else "",
+                                    r_.get("sex") or "",
+                                    r_.get("birth_date") or "",
+                                    r_.get("death_date") or ""))
+            apply_sort()
+
+        def apply_sort():
+            col, idx = state["col"], cols.index(state["col"])
+            kids = list(tree.get_children(""))
+
+            def val(iid):
+                v = tree.item(iid, "values")[idx]
+                if col == "age":
+                    return int(v) if v != "" else 0
+                return str(v).lower()
+            kids.sort(key=val, reverse=state["desc"])
+            kids.sort(key=lambda i: tree.item(i, "values")[idx] == "")
+            for pos, iid in enumerate(kids):
+                tree.move(iid, "", pos)
+            for c in cols:
+                mark = " ▼" if state["desc"] else " ▲"
+                tree.heading(c, text=heads[c] + (mark if c == col else ""),
+                             command=lambda cc=c: sort_by(cc))
+
+        def sort_by(col):
+            if state["col"] == col:
+                state["desc"] = not state["desc"]
+            else:
+                state["col"], state["desc"] = col, False
+            apply_sort()
+
+        for c in cols:
+            tree.heading(c, text=heads[c],
+                         command=lambda cc=c: sort_by(cc))
+        search_var.trace_add("write", lambda *_a: repopulate())
+        repopulate()
+
+        side = ttk.Frame(frame, padding=(10, 0, 0, 0))
+        side.grid(row=0, column=2, sticky="ns")
+        preview = ttk.Label(side, text="(select a person)", anchor="center",
+                            width=26)
+        preview.pack(pady=4)
+        detail = ttk.Label(side, text="", justify="left", wraplength=200)
+        detail.pack(anchor="w")
+        keep = {"img": None}
+
+        def on_sel(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            r_ = by_id[sel[0]]
+            age = self._actor_age(r_.get("birth_date"),
+                                  r_.get("death_date"))
+            detail.configure(
+                text=f"{r_.get('first_name', '')} "
+                     f"{r_.get('last_name', '')}\n"
+                     f"{r_.get('sex') or 'unknown'}"
+                     + (f", {age}" if age is not None else ""))
+            shot = self._actor_headshot(sel[0])
+            if shot:
+                try:
+                    img = Image.open(BytesIO(shot))
+                    img.thumbnail((190, 230), Image.LANCZOS)
+                    keep["img"] = ImageTk.PhotoImage(img)
+                    preview.configure(image=keep["img"], text="")
+                    return
+                except Exception:
+                    pass
+            keep["img"] = None
+            preview.configure(image="", text="(no photo)")
+        tree.bind("<<TreeviewSelect>>", on_sel)
+
+        def choose(_e=None):
+            sel = tree.selection()
+            if sel:
+                self._set_actor(by_id[sel[0]])
+                dlg.destroy()
+        tree.bind("<Double-1>", choose)
+
+        btns = ttk.Frame(dlg, padding=(8, 0, 8, 8))
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Use this person",
+                   command=choose).pack(side="right")
+        ttk.Button(btns, text="No person",
+                   command=lambda: (self._set_actor(None),
+                                    dlg.destroy())).pack(side="right", padx=6)
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side="right", padx=6)
+
+    def _actor_ref_path(self):
+        """The selected actor's headshot as a real file the generation
+        worker can upload — or None if it can't be produced."""
+        if not (self.actor_sel and self.actordb_path
+                and Path(self.actordb_path).exists()):
+            return None
+        try:
+            shot = self._actor_headshot(self.actor_sel["imdb_id"])
+            if not shot:
+                return None
+            p = Path(tempfile.gettempdir()) / \
+                f"cbac_actor_{self.actor_sel['imdb_id']}.jpg"
+            p.write_bytes(shot)
+            return str(p)
+        except Exception:
+            return None
+
     def _probe_ollama(self):
         """Look for a local Ollama once at startup, off the UI thread."""
         self.ui_queue.put(("ollama", ollama_models()))
@@ -3239,6 +3654,8 @@ class App:
             "transparent": self.transparent_var.get(),
             "upscale": self.upscale_var.get(),
             "ragmap_path": self.ragmap_path,
+            "actordb_path": self.actordb_path,
+            "actor_imdb": (self.actor_sel or {}).get("imdb_id"),
             "ollama_model": self.ollama_var.get(),
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
@@ -3336,6 +3753,18 @@ class App:
                         self._ragmap_label(self.ragmap, rmp))
                 except Exception:
                     self.ragmap = None
+            adb = st.get("actordb_path")
+            if adb and Path(adb).exists():
+                if self._load_actordb(adb, quiet=True) is not None:
+                    aid = st.get("actor_imdb")
+                    if aid:
+                        try:
+                            row = next((r for r in self._actordb_rows()
+                                        if r["imdb_id"] == aid), None)
+                            if row:
+                                self._set_actor(row)
+                        except Exception:
+                            pass
             self.seed_var.set(st.get("seed", "0"))
             self.random_seed_var.set(st.get("random_seed", True))
             self._auto_negative = st.get("auto_negative")
@@ -4002,11 +4431,73 @@ class App:
                             "instruction.")
         self._schedule_persist()
 
+    def _swap_person_in(self):
+        """One click: send the selected picture + the chosen person to Kontext
+        with a ready-made 'replace the person, keep everything else' prompt, so
+        a LoRA/RAG-built body becomes that specific person without redrawing the
+        art. Bypasses presets/LoRAs/RAG like any edit — the styling is already
+        baked into the picture being edited."""
+        if self._busy_guard():
+            return
+        if not engine_alive():
+            messagebox.showerror("Engine", "Engine is not running yet.")
+            return
+        if not self.actor_sel:
+            messagebox.showinfo("Swap person in",
+                                "Pick a person first (👤 Person…).")
+            return
+        if self.current is None or not self.session:
+            messagebox.showinfo("Swap person in",
+                                "Generate or select a picture to swap the "
+                                "person into first.")
+            return
+        img, _params, path = self.session[self.current]
+        if str(path).lower().endswith(".gif"):
+            self.status_var.set("Pick a still image to swap into — GIFs can't "
+                                "be edited directly.")
+            return
+        person = self._actor_ref_path()
+        if not person:
+            messagebox.showinfo("Swap person in",
+                                "This person has no photo in the database.")
+            return
+        # Kontext is the identity-preserving editor; make sure it can run.
+        if not self._ensure_editor_ready("kontext"):
+            return
+
+        try:
+            iw, ih = img.size
+        except Exception:
+            iw, ih = SIZE_PRESETS[self.size_var.get()]
+        params = dict(
+            prompt=SWAP_PERSON_PROMPT, user_prompt="swap person in",
+            style="", negative="", model="editor:kontext",
+            loras=[], width=iw, height=ih, seed=0, steps=None, cfg=None,
+            batch=1, random_seed=False, transparent=False, upscale=False,
+            preset=self.preset_var.get(),
+            ref_images=[str(path), person],
+            rag_ref_paths=[], rag_embed_paths=[], style_weight=0.8,
+            editor="kontext",
+            out_size=(iw, ih) if self.editor_canvas_var.get() else None,
+            denoise=1.0)
+
+        self.status_var.set(
+            f"Swapping {self.actor_sel.get('first_name', '')} "
+            f"{self.actor_sel.get('last_name', '')}".strip()
+            + " into the selected picture with Flux Kontext…")
+        CANCEL.clear()
+        self.busy = True
+        self.go_btn.state(["disabled"])
+        self.progress["value"] = 0
+        gen = Generator(self.ui_queue)
+        threading.Thread(target=gen.run, args=(params,), daemon=True).start()
+
     def _update_editor_btn(self):
-        if self.session:
-            self.editor_use_btn.state(["!disabled"])
-        else:
-            self.editor_use_btn.state(["disabled"])
+        has_history = bool(self.session)
+        state = "!disabled" if has_history else "disabled"
+        self.editor_use_btn.state([state])
+        if hasattr(self, "swap_btn"):
+            self.swap_btn.state([state])
 
     def _reuse_seed(self):
         if self.session:
@@ -4117,6 +4608,46 @@ class App:
                            "(install IP-Adapter via 🧭 RAG map… for image "
                            "guidance)."))
 
+        # Reference DB person, plain generation: the photo face-guides via
+        # IP-Adapter. Not RAG — no retrieval, the picture is passed
+        # straight through. Same engine rules as any image ref: SDXL only.
+        if self.actor_sel and not editing:
+            if model_family(model) in ("flux", "schnell"):
+                self.status_var.set("Person photo needs an SDXL model "
+                                    "(Juggernaut/DreamShaper) for plain "
+                                    "generations — skipped for this Flux "
+                                    "model (or use ➡ To editor).")
+            elif not self._style_support_ok():
+                self.status_var.set("Person photo skipped — IP-Adapter "
+                                    "isn't set up (reload the DB via 📇 "
+                                    "Reference DB… to get the install "
+                                    "offer).")
+            else:
+                ap = self._actor_ref_path()
+                if ap:
+                    rag_refs.append(ap)
+                    if rag_embed_paths:
+                        # both guide the same generation now: the private
+                        # map's embeds and this face photo chain on one
+                        # IP-Adapter (see build_graph's combined block)
+                        self.status_var.set(
+                            "Person photo + private RAG map are both "
+                            "guiding this generation (chained IP-Adapter).")
+
+        # Reference DB person, editing: the photo joins the loaded
+        # reference images, exactly as if it had been loaded with 🖼 Load…
+        edit_refs = list(self.ref_paths)
+        if editing and self.actor_sel:
+            ap = self._actor_ref_path()
+            if ap and ap not in edit_refs:
+                cap = 4 if editor == "kontext" else 3
+                if len(edit_refs) < cap:
+                    edit_refs.append(ap)
+                else:
+                    self.status_var.set(
+                        "Person photo left out — this editor takes at "
+                        f"most {cap} images and they are already loaded.")
+
         w, h = SIZE_PRESETS[self.size_var.get()]
         try:
             seed = int(self.seed_var.get())
@@ -4135,7 +4666,7 @@ class App:
                       transparent=self.transparent_var.get(),
                       upscale=self.upscale_var.get(),
                       preset=self.preset_var.get(),
-                      ref_images=list(self.ref_paths),
+                      ref_images=edit_refs,
                       rag_ref_paths=rag_refs, rag_embed_paths=rag_embed_paths,
                       style_weight=rag_weight,
                       editor=editor,

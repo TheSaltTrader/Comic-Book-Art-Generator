@@ -1,5 +1,48 @@
 # Changelog — Comic Book Art Creator
 
+## v1.19.0 — 2026-08-12
+- **LoRA + RAG + a person now combine in one generation.** When an
+  embeddings-only ("private") RAG map and a Reference DB person are both
+  active, they no longer fight — the map's guidance and the person's face
+  chain on a single IP-Adapter, so your LoRAs and RAG map build the styled
+  body and scene while the person steers the identity, all in one pass.
+  (Previously the chosen person replaced the private map for that run.)
+  Image-based RAG maps already combined with a person and still do; SDXL
+  models only, as before.
+- **🔀 Swap into selected — one-click person swap.** A new button by the
+  Reference DB sends the selected picture plus the chosen person straight to
+  Flux Kontext with a ready-made "replace the person, keep the pose, framing,
+  costume, lighting and art style" instruction. It turns the two-step
+  "build a styled body, then swap the face in" flow into a single click, and
+  keeps the output at the source picture's size. The button is enabled once
+  you have a generated or selected image and a person chosen.
+- The ℹ what-uses-what help now documents both: how LoRAs, RAG and a person
+  combine in plain generation, and the new one-click swap.
+
+## v1.18.0 — 2026-08-11
+- **Reference database.** A new part of the Image editor section loads a
+  people database made with the separate Actor DB Builder tool (a portable
+  SQLite file built by the user from IMDb lists: name, age, sex and a
+  photo per person — nothing ships with the app). 📇 Reference DB… loads
+  the file; 👤 Person… opens a picker — searchable, every column sortable
+  ascending/descending by clicking its header, with a photo preview — and
+  the chosen person shows as a small thumbnail. The photo is extra context
+  for the model, applied to whatever you're doing:
+  - *Editing* (editor images loaded): the photo joins the editor's
+    reference images exactly as if it had been loaded with 🖼 Load…, so
+    Kontext/Qwen can draw that person into the result. ➡ To editor loads
+    the photo as an editor reference directly for person-only edits.
+  - *Plain generation* (no editor images): the face guides via IP-Adapter
+    with your presets and LoRAs still active (SDXL models only). If an
+    embeddings-only RAG map is also active, the explicitly chosen person
+    wins for that run and the status bar says so.
+  This is not RAG: nothing is retrieved — the selected picture is sent
+  straight through. The DB path and chosen person survive restarts.
+- **What-uses-what help.** An ℹ button beside the Reference DB explains
+  which extras apply in each mode — editing bypasses presets, LoRAs and
+  RAG maps (the editor pipeline doesn't use them), plain generation keeps
+  them all — and the Image editor header now says so too.
+
 ## v1.17.0 — 2026-08-11
 - **Remove a LoRA from the list.** A new "🗑 Remove" button next to
   ➕ Add LoRA file… deletes the ticked LoRA(s) from your LoRA folder — the
