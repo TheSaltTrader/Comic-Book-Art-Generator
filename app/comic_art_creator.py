@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.26.0"
+APP_VERSION = "1.27.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2606,6 +2606,17 @@ class App:
         s.configure("Danger.TButton", background="#c0392b",
                     foreground="white", padding=6)
         s.map("Danger.TButton", background=[("active", "#e74c3c")])
+        # the in-panel Reference DB browser: green on black, terminal-style,
+        # so the table reads clearly against the art panel
+        s.configure("DB.Treeview", background="#000000",
+                    fieldbackground="#000000", foreground="#33ff66",
+                    rowheight=22, font=("Consolas", 10))
+        s.map("DB.Treeview",
+              background=[("selected", "#0a4d1f")],
+              foreground=[("selected", "#b8ffcc")])
+        s.configure("DB.Treeview.Heading", background="#0d1a0d",
+                    foreground="#33ff66", font=("Consolas", 10, "bold"))
+        s.map("DB.Treeview.Heading", background=[("active", "#143314")])
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
         s.configure("TRadiobutton", background=BG, foreground=FG)
@@ -3808,6 +3819,33 @@ class App:
         finally:
             conn.close()
 
+    def _actor_photo_blobs(self, imdb_id):
+        """ALL photos of one person, as a list of image bytes. Reads a
+        multi-photo `photo` table when the DB has one (future Actor DB
+        Builder versions), else falls back to the single headshot."""
+        blobs = []
+        try:
+            conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro",
+                                   uri=True)
+            try:
+                try:
+                    blobs = [r[0] for r in conn.execute(
+                        "SELECT image FROM photo WHERE imdb_id=? "
+                        "ORDER BY rowid", (imdb_id,)) if r[0]]
+                except sqlite3.Error:
+                    blobs = []
+                if not blobs:
+                    r = conn.execute(
+                        "SELECT headshot FROM actor WHERE imdb_id=?",
+                        (imdb_id,)).fetchone()
+                    if r and r[0]:
+                        blobs = [r[0]]
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return blobs
+
     def _set_actor(self, row):
         """row = dict from _actordb_rows, or None to clear the choice."""
         self.actor_sel = row
@@ -3839,8 +3877,10 @@ class App:
         self._schedule_persist()
 
     def _pick_actor(self):
-        """Sortable picker over the loaded actor DB, with a headshot
-        preview — click a column header to sort it, click again to flip."""
+        """The Reference DB browser — shown IN the art panel (the preview
+        canvas hides while it is open and comes back on Close). Sortable
+        green-on-black table, search, and a photo pane with ◀ ▶ arrows to
+        flip through every picture the DB holds for the person."""
         if not self.actordb_path or not Path(self.actordb_path).exists():
             messagebox.showinfo("Reference DB",
                                 "Load a reference database first "
@@ -3854,17 +3894,24 @@ class App:
             return
         by_id = {r["imdb_id"]: r for r in rows}
 
-        dlg = Toplevel(self.root)
-        dlg.title("Choose person")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("760x460")
+        self._close_db_browser(restore=False)   # never two at once
+        self._stop_gif()
+        dlg = self.dbview = ttk.Frame(self.canvas.master)
+        self.canvas.grid_remove()
+        dlg.grid(row=1, column=0, sticky=NSEW)
         srow = ttk.Frame(dlg, padding=(8, 8, 8, 0))
         srow.pack(fill="x")
-        ttk.Label(srow, text="🔍 Search").pack(side="left")
+        ttk.Label(srow, text="📇 REFERENCE DATABASE",
+                  style="Head.TLabel").pack(side="left")
+        ttk.Label(srow, text="   🔍").pack(side="left")
         search_var = StringVar()
         ttk.Entry(srow, textvariable=search_var).pack(
             side="left", fill="x", expand=True, padx=6)
+        close_btn = ttk.Button(srow, text="✖ Close", width=9,
+                               command=self._close_db_browser)
+        close_btn.pack(side="right")
+        self._tip(close_btn, "Close the browser — the art panel comes "
+                             "back exactly as it was.")
         frame = ttk.Frame(dlg, padding=8)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
@@ -3874,7 +3921,7 @@ class App:
         heads = {"first": "First name", "last": "Last name", "age": "Age",
                  "sex": "Sex", "born": "Born", "died": "Died"}
         tree = ttk.Treeview(frame, columns=cols, show="headings",
-                            selectmode="browse")
+                            selectmode="browse", style="DB.Treeview")
         widths = {"first": 110, "last": 140, "age": 45, "sex": 60,
                   "born": 85, "died": 85}
         for c in cols:
@@ -3942,9 +3989,48 @@ class App:
         preview = ttk.Label(side, text="(select a person)", anchor="center",
                             width=26)
         preview.pack(pady=4)
+        # ◀ n/m ▶ under the picture — flips through every photo the DB
+        # holds for the person (multi-photo databases)
+        arow = ttk.Frame(side)
+        arow.pack(pady=(0, 4))
+        pv = {"blobs": [], "i": 0, "img": None}
+
+        def show_photo():
+            n = len(pv["blobs"])
+            counter.configure(text=f"{pv['i'] + 1} / {n}" if n else "—")
+            state = ["!disabled"] if n > 1 else ["disabled"]
+            prev_btn.state(state)
+            next_btn.state(state)
+            if not n:
+                pv["img"] = None
+                preview.configure(image="", text="(no photo)")
+                return
+            try:
+                img = Image.open(BytesIO(pv["blobs"][pv["i"]]))
+                img.thumbnail((190, 230), Image.LANCZOS)
+                pv["img"] = ImageTk.PhotoImage(img)
+                preview.configure(image=pv["img"], text="")
+            except Exception:
+                pv["img"] = None
+                preview.configure(image="", text="(bad photo)")
+
+        def flip(step):
+            if len(pv["blobs"]) > 1:
+                pv["i"] = (pv["i"] + step) % len(pv["blobs"])
+                show_photo()
+
+        prev_btn = ttk.Button(arow, text="◀", width=3,
+                              command=lambda: flip(-1))
+        prev_btn.pack(side="left")
+        counter = ttk.Label(arow, text="—", width=7, anchor="center")
+        counter.pack(side="left", padx=4)
+        next_btn = ttk.Button(arow, text="▶", width=3,
+                              command=lambda: flip(1))
+        next_btn.pack(side="left")
+        self._tip(prev_btn, "Previous photo of this person.")
+        self._tip(next_btn, "Next photo of this person.")
         detail = ttk.Label(side, text="", justify="left", wraplength=200)
         detail.pack(anchor="w")
-        keep = {"img": None}
 
         def on_sel(_e=None):
             sel = tree.selection()
@@ -3958,53 +4044,65 @@ class App:
                      f"{r_.get('last_name', '')}\n"
                      f"{r_.get('sex') or 'unknown'}"
                      + (f", {age}" if age is not None else ""))
-            shot = self._actor_headshot(sel[0])
-            if shot:
-                try:
-                    img = Image.open(BytesIO(shot))
-                    img.thumbnail((190, 230), Image.LANCZOS)
-                    keep["img"] = ImageTk.PhotoImage(img)
-                    preview.configure(image=keep["img"], text="")
-                    return
-                except Exception:
-                    pass
-            keep["img"] = None
-            preview.configure(image="", text="(no photo)")
+            pv["blobs"] = self._actor_photo_blobs(sel[0])
+            pv["i"] = 0
+            show_photo()
         tree.bind("<<TreeviewSelect>>", on_sel)
+        self._dbview_state = pv          # for tests / future hooks
 
         def choose(_e=None):
             sel = tree.selection()
             if sel:
                 self._set_actor(by_id[sel[0]])
-                dlg.destroy()
+                self._close_db_browser()
         tree.bind("<Double-1>", choose)
 
         btns = ttk.Frame(dlg, padding=(8, 0, 8, 8))
         btns.pack(fill="x")
-        ttk.Button(btns, text="Use this person",
+        ttk.Button(btns, text="✔ Use this person",
                    command=choose).pack(side="right")
         ttk.Button(btns, text="No person",
                    command=lambda: (self._set_actor(None),
-                                    dlg.destroy())).pack(side="right", padx=6)
-        ttk.Button(btns, text="Cancel",
-                   command=dlg.destroy).pack(side="right", padx=6)
+                                    self._close_db_browser())).pack(
+            side="right", padx=6)
+
+    def _close_db_browser(self, restore=True):
+        """Tear the in-panel DB browser down and bring the art back."""
+        dv = getattr(self, "dbview", None)
+        if dv is not None:
+            try:
+                dv.destroy()
+            except Exception:
+                pass
+            self.dbview = None
+        self._dbview_state = None
+        if restore:
+            self.canvas.grid()
+            self._show_current()
 
     def _actor_ref_path(self):
-        """The selected actor's headshot as a real file the generation
+        """The selected actor's first photo as a real file the generation
         worker can upload — or None if it can't be produced."""
+        paths = self._actor_ref_paths_all()
+        return paths[0] if paths else None
+
+    def _actor_ref_paths_all(self):
+        """ALL of the selected actor's photos as real files (multi-photo
+        DBs give several; classic DBs give one)."""
         if not (self.actor_sel and self.actordb_path
                 and Path(self.actordb_path).exists()):
-            return None
+            return []
         try:
-            shot = self._actor_headshot(self.actor_sel["imdb_id"])
-            if not shot:
-                return None
-            p = Path(tempfile.gettempdir()) / \
-                f"cbac_actor_{self.actor_sel['imdb_id']}.jpg"
-            p.write_bytes(shot)
-            return str(p)
+            out = []
+            for i, blob in enumerate(
+                    self._actor_photo_blobs(self.actor_sel["imdb_id"])):
+                p = Path(tempfile.gettempdir()) / \
+                    f"cbac_actor_{self.actor_sel['imdb_id']}_{i}.jpg"
+                p.write_bytes(blob)
+                out.append(str(p))
+            return out
         except Exception:
-            return None
+            return []
 
     def _probe_ollama(self):
         """Look for a local Ollama once at startup, off the UI thread."""
@@ -5159,11 +5257,9 @@ class App:
         return []
 
     def _actor_ref_paths(self):
-        """All available photos of the chosen Reference DB person. The
-        current DB schema stores one headshot per actor; a multi-photo DB
-        plugs in here without touching the swap pipeline."""
-        p = self._actor_ref_path()
-        return [p] if p else []
+        """All available photos of the chosen Reference DB person —
+        multi-photo databases feed every picture into the swap."""
+        return self._actor_ref_paths_all()
 
     def _tip(self, widget, text):
         """Attach a hover tooltip and keep a reference so it isn't collected."""

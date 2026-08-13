@@ -396,6 +396,21 @@ builds `build_qwen_edit_graph` with `QWEN_SWAP_PROMPT` ("image 1 / image
 2" wording) or the Kontext chain as before. Same out_size/seed plumbing
 in both.
 
+**In-panel Reference DB browser (v1.27.0)** — `_pick_actor` no longer
+builds a Toplevel: it grids `self.dbview` into the SAME cell as the
+preview canvas (`canvas.grid_remove()` hides, `grid()` restores — grid
+options survive removal) and `_close_db_browser()` destroys the frame
+and calls `_show_current()`. Style `DB.Treeview` = green (#33ff66) on
+black, Consolas, with a Heading variant. The photo pane has ◀ n/m ▶
+arrows fed by `_actor_photo_blobs(imdb_id)`: reads a multi-photo
+`photo(imdb_id, image)` table when present (future Actor DB Builder),
+falls back to the single `actor.headshot`. `_actor_ref_paths_all()`
+writes every blob to a temp file so multi-photo people feed the swap
+with several pictures automatically. Open guards: `_stop_gif()` first
+(a playing GIF would keep drawing to the hidden canvas), and
+`_close_db_browser(restore=False)` before building so two browsers can
+never stack.
+
 **Detail-preserving + multi-face swap (v1.26.0)** — the swap runs at
 FULL denoise (identity needs the freedom: partial denoise was measured
 and REJECTED — 0.85 preserved barely more than a full re-render yet

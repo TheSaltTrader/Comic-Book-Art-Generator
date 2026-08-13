@@ -1,5 +1,17 @@
 # Changelog — Comic Book Art Creator
 
+## v1.27.0 — 2026-08-13
+- **The Reference DB browser lives in the art panel now.** 👤 Person… no
+  longer opens a popup: the browser appears where the picture preview is,
+  and ✖ Close (or choosing a person) brings the art panel back exactly
+  as it was. The table is green-on-black, terminal style, so the rows
+  read clearly — same search box and click-to-sort columns as before.
+- **Photo arrows.** ◀ ▶ under the person's picture flip through every
+  photo the database holds for them (with a 1/N counter). Databases with
+  one headshot per person work as before; when your actor database gains
+  multiple photos per person they browse — and feed the face swap —
+  automatically.
+
 ## v1.26.0 — 2026-08-12
 - **Detail-preserving swap.** The swapped picture used to be a full
   re-render of the base — softer reflections, flatter sunlight, lost
