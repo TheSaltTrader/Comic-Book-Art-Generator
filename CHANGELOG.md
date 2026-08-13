@@ -1,5 +1,13 @@
 # Changelog — Comic Book Art Creator
 
+## v1.29.0 — 2026-08-13
+- **The database browser has a real grid now.** Every cell is boxed in
+  clean white lines, and the text is white on black (replacing the green
+  terminal look) — much easier to scan. Same search, click-to-sort
+  headers (with the ▲▼ marker), row highlight, photo arrows and buttons.
+  Very large databases show the first 1,500 matches and tell you how
+  many more the search can narrow down.
+
 ## v1.28.0 — 2026-08-13
 - **The app now reads every database the DB-builder tools produce.**
   📇 Reference DB… accepts the comic-character databases

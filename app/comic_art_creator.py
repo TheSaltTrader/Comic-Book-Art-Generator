@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.28.0"
+APP_VERSION = "1.29.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -4019,58 +4019,133 @@ class App:
         heads = {s[0]: s[1] for s in spec}
         getters = {s[0]: s[4] for s in spec}
         numeric = {s[0] for s in spec if s[5]}
-        tree = ttk.Treeview(frame, columns=cols, show="headings",
-                            selectmode="browse", style="DB.Treeview")
-        for cid, _h, width, anchor, _g, _n in spec:
-            tree.column(cid, width=width, anchor=anchor)
-        tree.grid(row=0, column=0, sticky=NSEW)
-        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=sb.set)
+        anchors = {s[0]: s[3] for s in spec}
+        # column widths in monospace characters (spec widths are px)
+        widths = {s[0]: max(5, s[2] // 8) for s in spec}
+        ROW_CAP = 1500     # rows rendered at once — search narrows the rest
+
+        # a Text widget draws the table: ttk's Treeview cannot render cell
+        # gridlines, a monospace grid of box-drawing characters can — and
+        # it stays fast at tens of thousands of rows
+        table = Text(frame, bg="#000000", fg="#ffffff", bd=0,
+                     insertwidth=0, highlightthickness=0, wrap="none",
+                     font=("Consolas", 10), cursor="arrow",
+                     exportselection=False, takefocus=0)
+        table.grid(row=0, column=0, sticky=NSEW)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
+        table.configure(yscrollcommand=sb.set)
         sb.grid(row=0, column=1, sticky="ns")
+        table.tag_configure("head", font=("Consolas", 10, "bold"))
+        table.tag_configure("selrow", background="#0a4d1f")
+        view = {"rows": [], "shown": 0, "sel": None}
+
+        def fmt(c, v):
+            w = widths[c]
+            v = str(v)
+            if len(v) > w:
+                v = v[:max(1, w - 1)] + "…"
+            return v.center(w) if anchors[c] == "center" else v.ljust(w)
+
+        def rule(l, m, r, fill):
+            return l + m.join(fill * (widths[c] + 2) for c in cols) + r
+
+        def render():
+            table.configure(state="normal")
+            table.delete("1.0", END)
+            mark = " ▼" if state["desc"] else " ▲"
+            head = "│ " + " │ ".join(
+                fmt(c, heads[c] + (mark if c == state["col"] else ""))
+                for c in cols) + " │"
+            lines = [rule("┌", "┬", "┐", "─"), head,
+                     rule("╞", "╪", "╡", "═")]
+            shown = view["rows"][:ROW_CAP]
+            view["shown"] = len(shown)
+            between = rule("├", "┼", "┤", "─")
+            for r_ in shown:
+                lines.append("│ " + " │ ".join(
+                    fmt(c, getters[c](r_)) for c in cols) + " │")
+                lines.append(between)
+            if shown:
+                lines[-1] = rule("└", "┴", "┘", "─")
+            else:
+                lines.append(rule("└", "┴", "┘", "─"))
+            hidden = len(view["rows"]) - len(shown)
+            if hidden:
+                lines.append(f"  … {hidden} more — type in 🔍 to narrow "
+                             "the list")
+            table.insert("1.0", "\n".join(lines))
+            table.tag_add("head", "2.0", "2.end")
+            paint_sel()
+            table.configure(state="disabled")
+
+        def paint_sel():
+            table.tag_remove("selrow", "1.0", END)
+            if view["sel"] is None:
+                return
+            for i, r_ in enumerate(view["rows"][:view["shown"]]):
+                if r_["imdb_id"] == view["sel"]:
+                    ln = 4 + 2 * i
+                    table.tag_add("selrow", f"{ln}.0", f"{ln}.end")
+                    break
 
         def repopulate():
-            tree.delete(*tree.get_children(""))
             needle = search_var.get().strip().lower()
+            vr = []
             for r_ in rows:
                 hay = (f"{getters[cols[0]](r_)} {getters[cols[1]](r_)}"
                        ).lower()
-                if needle and needle not in hay:
-                    continue
-                tree.insert("", END, iid=r_["imdb_id"],
-                            values=tuple(getters[c](r_) for c in cols))
-            apply_sort()
+                if not needle or needle in hay:
+                    vr.append(r_)
+            col = state["col"]
+            g = getters[col]
 
-        def apply_sort():
-            col, idx = state["col"], cols.index(state["col"])
-            kids = list(tree.get_children(""))
-
-            def val(iid):
-                v = tree.item(iid, "values")[idx]
+            def val(r_):
+                v = g(r_)
                 if col in numeric:
                     try:
                         return int(v)
                     except (TypeError, ValueError):
                         return 0
                 return str(v).lower()
-            kids.sort(key=val, reverse=state["desc"])
-            kids.sort(key=lambda i: tree.item(i, "values")[idx] == "")
-            for pos, iid in enumerate(kids):
-                tree.move(iid, "", pos)
-            for c in cols:
-                mark = " ▼" if state["desc"] else " ▲"
-                tree.heading(c, text=heads[c] + (mark if c == col else ""),
-                             command=lambda cc=c: sort_by(cc))
+            vr.sort(key=val, reverse=state["desc"])
+            vr.sort(key=lambda r_: str(g(r_)) == "")
+            view["rows"] = vr
+            render()
 
         def sort_by(col):
             if state["col"] == col:
                 state["desc"] = not state["desc"]
             else:
                 state["col"], state["desc"] = col, False
-            apply_sort()
+            repopulate()
 
-        for c in cols:
-            tree.heading(c, text=heads[c],
-                         command=lambda cc=c: sort_by(cc))
+        def select_iid(iid):
+            view["sel"] = iid
+            table.configure(state="normal")
+            paint_sel()
+            table.configure(state="disabled")
+            r_ = by_id[iid]
+            detail.configure(text=detail_text(r_))
+            pv["blobs"] = self._actor_photo_blobs(iid)
+            pv["i"] = 0
+            show_photo()
+
+        def on_click(ev):
+            pos = table.index(f"@{ev.x},{ev.y}")
+            ln, cx = int(pos.split(".")[0]), int(pos.split(".")[1])
+            if ln == 2:                       # header → sort that column
+                x = 2
+                for c in cols:
+                    if cx < x + widths[c] + 1:
+                        sort_by(c)
+                        return
+                    x += widths[c] + 3
+                return
+            idx = ln - 4
+            if idx >= 0 and idx % 2 == 0 and idx // 2 < view["shown"]:
+                select_iid(view["rows"][idx // 2]["imdb_id"])
+
+        table.bind("<Button-1>", on_click)
         search_var.trace_add("write", lambda *_a: repopulate())
         repopulate()
 
@@ -4153,23 +4228,17 @@ class App:
                     lines.append(str(r_["description"])[:160])
             return "\n".join(lines)
 
-        def on_sel(_e=None):
-            sel = tree.selection()
-            if not sel:
-                return
-            detail.configure(text=detail_text(by_id[sel[0]]))
-            pv["blobs"] = self._actor_photo_blobs(sel[0])
-            pv["i"] = 0
-            show_photo()
-        tree.bind("<<TreeviewSelect>>", on_sel)
-        self._dbview_state = pv          # for tests / future hooks
-
         def choose(_e=None):
-            sel = tree.selection()
-            if sel:
-                self._set_actor(by_id[sel[0]])
+            if view["sel"] is not None:
+                self._set_actor(by_id[view["sel"]])
                 self._close_db_browser()
-        tree.bind("<Double-1>", choose)
+        table.bind("<Double-1>", choose)
+        self._dbview_state = pv          # for tests / future hooks
+        self._dbview_api = {             # widget-independent test surface
+            "select": select_iid, "sort": sort_by,
+            "rows": lambda: view["rows"],
+            "selected": lambda: view["sel"], "table": table,
+            "choose": choose}
 
         btns = ttk.Frame(dlg, padding=(8, 0, 8, 8))
         btns.pack(fill="x")
@@ -4190,6 +4259,7 @@ class App:
                 pass
             self.dbview = None
         self._dbview_state = None
+        self._dbview_api = None
         if restore:
             self.canvas.grid()
             self._show_current()

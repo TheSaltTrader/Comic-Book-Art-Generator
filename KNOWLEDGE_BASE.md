@@ -396,6 +396,20 @@ builds `build_qwen_edit_graph` with `QWEN_SWAP_PROMPT` ("image 1 / image
 2" wording) or the Kontext chain as before. Same out_size/seed plumbing
 in both.
 
+**Grid table (v1.29.0)** — ttk's Treeview cannot draw cell gridlines on
+Tk 8.6, so the browser's table is a read-only `Text` widget rendering a
+monospace box-drawing grid (white lines + white letters on black, bold
+header line, `selrow` tag for the highlight). The v1.28 `spec` list
+(id/heading/px-width/anchor/getter/numeric) still drives everything —
+px widths become character widths (`px // 8`, Consolas 10). Line math:
+line 1 top border, 2 header (click → column from char offset), 3 double
+rule, data rows at `4 + 2*i` with a rule between each. `ROW_CAP` 1500
+rows rendered per view (a footer reports the hidden count) so 47k-row
+character DBs stay instant; filtering/sorting always run on the full
+list. Selection/sort/choose are exposed on `self._dbview_api` so tests
+never have to spelunk widgets. The old `DB.Treeview` styles remain
+defined but unused.
+
 **In-panel Reference DB browser (v1.27.0)** — `_pick_actor` no longer
 builds a Toplevel: it grids `self.dbview` into the SAME cell as the
 preview canvas (`canvas.grid_remove()` hides, `grid()` restores — grid
