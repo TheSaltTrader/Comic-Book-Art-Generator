@@ -1,5 +1,16 @@
 # Changelog — Comic Book Art Creator
 
+## v1.32.0 — 2026-08-13
+- **The photo arrows stay put.** The picture now sits in a fixed-size
+  box, so tall, wide or small photos no longer push the ◀ ▶ arrows and
+  the details around — they stay exactly where you left them as you flip
+  through a person's pictures.
+- **Columns fill the window, and you can resize them.** The grid always
+  spans the full panel and follows along as you resize the window or
+  maximise it. Drag any column border in the header to make that column
+  wider or narrower — the others give way, and the grid stays full-width
+  (the cursor changes to a resize arrow when you're over a border).
+
 ## v1.31.0 — 2026-08-13
 - **Row numbers.** The database browser has a # column showing each
   row's position in the current (searched + sorted) list, so you always

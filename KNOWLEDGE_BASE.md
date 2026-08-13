@@ -426,6 +426,21 @@ the closed `└┴┘` border: a dangling `├┼┤` continuation rule opticall
 reads as a cut-off row (cost a debugging round — the "clipped" row in a
 screenshot was the rule glyph's descending strokes; diagnose with
 `dlineinfo`/`yview`, not eyeballs).
+**v1.32.0 — elastic columns**: each column keeps a `ratio` (share of the
+table); `fit_widths()` runs at the top of every `render()` and sizes the
+columns to exactly fill `winfo_width() // char_px` (line length =
+`nw + 4 + sum(w) + 3*len(cols)`), so the grid follows window resizes
+and maximise. Dragging a header border calls `resize_col()`, which sets
+that width, re-derives every ratio, and refits — the neighbours give way
+and the grid stays full-width. Press/motion/release are split so a
+plain click still sorts (decided on release); `near_border()` uses
+`col_borders()` (`[0, nw+3, …+w+3]`) with ±1 char tolerance, and
+`<Motion>` swaps the cursor to `sb_h_double_arrow` over a border.
+**Fixed photo box**: the preview label lives inside a 200×240 frame with
+`pack_propagate(False)` — without it the label resizes to each photo and
+everything below it (arrows, details) jumps around. Verified by
+measuring the ▶ button's absolute position across a tall, a wide and a
+square photo (identical).
 
 **In-panel Reference DB browser (v1.27.0)** — `_pick_actor` no longer
 builds a Toplevel: it grids `self.dbview` into the SAME cell as the

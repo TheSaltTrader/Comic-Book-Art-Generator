@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.31.0"
+APP_VERSION = "1.32.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -4020,8 +4020,13 @@ class App:
         getters = {s[0]: s[4] for s in spec}
         numeric = {s[0] for s in spec if s[5]}
         anchors = {s[0]: s[3] for s in spec}
-        # column widths in monospace characters (spec widths are px)
+        # column widths in monospace characters (spec widths are px).
+        # `ratio` is each column's share of the table — the grid always
+        # fills the panel, and a manual drag just changes the shares.
         widths = {s[0]: max(5, s[2] // 8) for s in spec}
+        MIN_COL = 4
+        _tot0 = sum(widths.values()) or 1
+        ratio = {c: widths[c] / _tot0 for c in widths}
 
         # a Text widget draws the table: ttk's Treeview cannot render cell
         # gridlines, a monospace grid of box-drawing characters can. The
@@ -4063,6 +4068,44 @@ class App:
 
         sb = ttk.Scrollbar(frame, orient="vertical", command=on_scroll)
         sb.grid(row=0, column=1, sticky="ns")
+        _char_px = max(1, _tkfont.Font(
+            root=self.root, font=("Consolas", 10)).measure("0"))
+
+        def col_borders():
+            """Character offsets of the vertical rules, left to right."""
+            b = [0, view.get("nw", 2) + 3]
+            for c in cols:
+                b.append(b[-1] + widths[c] + 3)
+            return b
+
+        def fit_widths():
+            """Size the columns to fill the table's current width, keeping
+            each column's share — so the grid spans the panel and follows
+            the window as it is resized."""
+            avail = table.winfo_width() // _char_px
+            room = avail - view.get("nw", 2) - 4 - 3 * len(cols)
+            if room < MIN_COL * len(cols):
+                return
+            total = sum(ratio.values()) or 1
+            new = {c: max(MIN_COL, int(room * ratio[c] / total))
+                   for c in cols}
+            slack = room - sum(new.values())
+            if slack:                     # rounding remainder → widest col
+                widest = max(cols, key=lambda c: new[c])
+                new[widest] = max(MIN_COL, new[widest] + slack)
+            widths.update(new)
+
+        def resize_col(c, delta):
+            """Drag of a column border: take/give characters and rebalance
+            the others so the grid still fills the width."""
+            want = max(MIN_COL, widths[c] + delta)
+            if want == widths[c]:
+                return
+            widths[c] = want
+            tot = sum(widths.values()) or 1
+            for k in cols:                # remember the new proportions
+                ratio[k] = widths[k] / tot
+            render()
 
         def fmt(c, v):
             w = widths[c]
@@ -4077,9 +4120,10 @@ class App:
 
         def render():
             n = len(view["rows"])
+            view["nw"] = max(2, len(str(n)))    # row-number column width
+            fit_widths()                        # always span the panel
             rpv = rows_per_view()
             view["off"] = max(0, min(view["off"], max(0, n - rpv)))
-            view["nw"] = max(2, len(str(n)))    # row-number column width
             table.configure(state="normal")
             table.delete("1.0", END)
             mark = " ▼" if state["desc"] else " ▲"
@@ -4204,7 +4248,56 @@ class App:
                 select_iid(
                     view["rows"][view["off"] + idx // 2]["imdb_id"])
 
-        table.bind("<Button-1>", on_click)
+        # drag a column border (in the header band) to resize that column;
+        # a plain click still sorts / selects, decided on release
+        drag = {"col": None, "x0": 0, "w0": 0}
+
+        def near_border(cx):
+            """The column whose RIGHT border sits at (or beside) char cx."""
+            b = col_borders()
+            for i, c in enumerate(cols):
+                if abs(cx - b[i + 2]) <= 1:
+                    return c
+            return None
+
+        def on_press(ev):
+            pos = table.index(f"@{ev.x},{ev.y}")
+            ln, cx = int(pos.split(".")[0]), int(pos.split(".")[1])
+            if ln <= 3:
+                c = near_border(cx)
+                if c:
+                    drag.update(col=c, x0=ev.x, w0=widths[c])
+                    return "break"
+            drag["col"] = None
+
+        def on_drag(ev):
+            if not drag["col"]:
+                return
+            want = max(MIN_COL,
+                       drag["w0"] + (ev.x - drag["x0"]) // _char_px)
+            resize_col(drag["col"], want - widths[drag["col"]])
+            return "break"
+
+        def on_release(ev):
+            if drag["col"]:
+                drag["col"] = None
+                return "break"
+            on_click(ev)
+
+        def on_motion(ev):
+            try:
+                pos = table.index(f"@{ev.x},{ev.y}")
+                ln, cx = int(pos.split(".")[0]), int(pos.split(".")[1])
+            except Exception:
+                return
+            table.configure(
+                cursor="sb_h_double_arrow"
+                if ln <= 3 and near_border(cx) else "arrow")
+
+        table.bind("<Button-1>", on_press)
+        table.bind("<B1-Motion>", on_drag)
+        table.bind("<ButtonRelease-1>", on_release)
+        table.bind("<Motion>", on_motion)
         table.bind("<MouseWheel>",
                    lambda e: (on_scroll("scroll",
                                         -1 if e.delta > 0 else 1,
@@ -4216,9 +4309,16 @@ class App:
 
         side = ttk.Frame(frame, padding=(10, 0, 0, 0))
         side.grid(row=0, column=2, sticky="ns")
-        preview = ttk.Label(side, text="(select a person)", anchor="center",
-                            width=26)
-        preview.pack(pady=4)
+        # the picture lives in a FIXED box (propagation off) so photos of
+        # different sizes never move the ◀ ▶ arrows or the details below
+        PHOTO_BOX = (200, 240)
+        pbox = ttk.Frame(side, width=PHOTO_BOX[0], height=PHOTO_BOX[1])
+        pbox.pack(pady=4)
+        pbox.pack_propagate(False)
+        preview = ttk.Label(pbox, text="(select a person)", anchor="center",
+                            justify="center",
+                            wraplength=PHOTO_BOX[0] - 8)
+        preview.pack(fill="both", expand=True)
         # ◀ n/m ▶ under the picture — flips through every photo the DB
         # holds for the person (multi-photo databases)
         arow = ttk.Frame(side)
@@ -4304,7 +4404,9 @@ class App:
             "rows": lambda: view["rows"],
             "selected": lambda: view["sel"], "table": table,
             "choose": choose, "scroll": on_scroll,
-            "offset": lambda: view["off"]}
+            "offset": lambda: view["off"],
+            "widths": lambda: dict(widths), "resize": resize_col,
+            "photo_box": pbox, "borders": col_borders}
 
         btns = ttk.Frame(dlg, padding=(8, 0, 8, 8))
         btns.pack(fill="x")
