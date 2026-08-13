@@ -1,5 +1,17 @@
 # Changelog — Comic Book Art Creator
 
+## v1.31.0 — 2026-08-13
+- **Row numbers.** The database browser has a # column showing each
+  row's position in the current (searched + sorted) list, so you always
+  know where you are while scrolling thousands of entries.
+- **No more cut-off bottom row.** The table only ever draws rows that
+  fit completely — the height math now asks the widget what actually
+  fits instead of estimating, and the visible block always ends with a
+  clean closed border (the old dangling divider looked like a clipped
+  row even when nothing was cut).
+- Full-list scrolling double-checked end to end: scrollbar, mouse wheel
+  and page jumps reach the very last row of the largest databases.
+
 ## v1.30.0 — 2026-08-13
 - **The database browser scrolls through the entire list now.** The
   1,500-row display limit is gone: the scrollbar spans the whole

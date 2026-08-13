@@ -414,6 +414,18 @@ never scrolls internally; `<Configure>` re-renders; click math adds
 only ever ~40 rows, so it is instant. Selection/sort/choose/scroll/
 offset are exposed on `self._dbview_api` so tests never have to spelunk
 widgets. The old `DB.Treeview` styles remain defined but unused.
+**v1.31.0**: a `#` row-number column (absolute position in the filtered+
+sorted list; `view["nw"]` width feeds the rule builders and the header
+click-x math). Whole-rows-only fit: `rows_per_view` has no partial `+1`,
+and because font metrics lie under DPI scaling, render() schedules an
+after_idle check of `table.yview()[1]` — if the block overflows, whole
+rows are dropped (`view["adj"]`) and it redraws; `<Configure>` resets
+adj. NB `yview()` reads STALE geometry when called inside render — the
+after_idle deferral is load-bearing. The visible block always ends with
+the closed `└┴┘` border: a dangling `├┼┤` continuation rule optically
+reads as a cut-off row (cost a debugging round — the "clipped" row in a
+screenshot was the rule glyph's descending strokes; diagnose with
+`dlineinfo`/`yview`, not eyeballs).
 
 **In-panel Reference DB browser (v1.27.0)** — `_pick_actor` no longer
 builds a Toplevel: it grids `self.dbview` into the SAME cell as the

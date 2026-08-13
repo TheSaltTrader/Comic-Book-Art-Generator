@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.30.0"
+APP_VERSION = "1.31.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -4037,12 +4037,18 @@ class App:
         table.tag_configure("selrow", background="#0a4d1f")
         view = {"rows": [], "off": 0, "shown": 0, "sel": None}
         import tkinter.font as _tkfont
-        _line_px = max(1, _tkfont.Font(
-            root=self.root, font=("Consolas", 10)).metrics("linespace"))
+        # font metrics are only an estimate — DPI scaling makes the real
+        # rendered line taller; render() measures the truth via dlineinfo
+        # and re-renders once, so the bottom row is never cut
+        lp = {"px": max(1, _tkfont.Font(
+            root=self.root, font=("Consolas", 10)).metrics("linespace")),
+            "fixing": False}
 
         def rows_per_view():
-            # each data row is two text lines (row + rule); 3 header lines
-            return max(5, (table.winfo_height() // _line_px - 3) // 2 + 1)
+            # data rows that fit FULLY (3 header lines, 2 lines per row);
+            # "adj" is the overflow correction measured after rendering
+            return max(3, (table.winfo_height() // lp["px"] - 3) // 2
+                       - view.get("adj", 0))
 
         def on_scroll(*args):
             n = len(view["rows"])
@@ -4066,32 +4072,38 @@ class App:
             return v.center(w) if anchors[c] == "center" else v.ljust(w)
 
         def rule(l, m, r, fill):
-            return l + m.join(fill * (widths[c] + 2) for c in cols) + r
+            return (l + fill * (view.get("nw", 2) + 2) + m
+                    + m.join(fill * (widths[c] + 2) for c in cols) + r)
 
         def render():
             n = len(view["rows"])
             rpv = rows_per_view()
             view["off"] = max(0, min(view["off"], max(0, n - rpv)))
+            view["nw"] = max(2, len(str(n)))    # row-number column width
             table.configure(state="normal")
             table.delete("1.0", END)
             mark = " ▼" if state["desc"] else " ▲"
-            head = "│ " + " │ ".join(
+            head = ("│ " + "#".rjust(view["nw"]) + " │ " + " │ ".join(
                 fmt(c, heads[c] + (mark if c == state["col"] else ""))
-                for c in cols) + " │"
+                for c in cols) + " │")
             lines = [rule("┌", "┬", "┐", "─"), head,
                      rule("╞", "╪", "╡", "═")]
             shown = view["rows"][view["off"]:view["off"] + rpv]
             view["shown"] = len(shown)
             between = rule("├", "┼", "┤", "─")
-            for r_ in shown:
-                lines.append("│ " + " │ ".join(
-                    fmt(c, getters[c](r_)) for c in cols) + " │")
+            for i, r_ in enumerate(shown):
+                lines.append(
+                    "│ " + str(view["off"] + i + 1).rjust(view["nw"])
+                    + " │ " + " │ ".join(
+                        fmt(c, getters[c](r_)) for c in cols) + " │")
                 lines.append(between)
-            end_visible = view["off"] + len(shown) >= n
+            # always close the block with the bottom border — a dangling
+            # "├─┼─┤" rule reads as a cut-off row; the scrollbar already
+            # says the list continues
             closer = rule("└", "┴", "┘", "─")
-            if shown and end_visible:
+            if shown:
                 lines[-1] = closer
-            elif not shown:
+            else:
                 lines.append(closer)
             table.insert("1.0", "\n".join(lines))
             table.tag_add("head", "2.0", "2.end")
@@ -4102,6 +4114,23 @@ class App:
                 sb.set(view["off"] / n, (view["off"] + len(shown)) / n)
             else:
                 sb.set(0, 1)
+            # trust the widget, not font math: once layout settles, check
+            # whether the rendered block pokes past the viewport; if so,
+            # drop whole rows and redraw — the bottom row is never left
+            # cut in half. Deferred via after_idle because yview() only
+            # reflects geometry after Tk has recomputed display lines.
+            def _check_overflow():
+                lp["fixing"] = False
+                last_frac = table.yview()[1]
+                if last_frac < 0.999 and view["shown"] > 1:
+                    total = 3 + 2 * view["shown"]
+                    hidden = int(total * (1.0 - last_frac) + 0.999)
+                    view["adj"] = view.get("adj", 0) \
+                        + max(1, (hidden + 1) // 2)
+                    render()
+            if not lp["fixing"]:
+                lp["fixing"] = True
+                table.after_idle(_check_overflow)
 
         def paint_sel():
             table.tag_remove("selrow", "1.0", END)
@@ -4161,7 +4190,9 @@ class App:
             pos = table.index(f"@{ev.x},{ev.y}")
             ln, cx = int(pos.split(".")[0]), int(pos.split(".")[1])
             if ln == 2:                       # header → sort that column
-                x = 2
+                x = 5 + view.get("nw", 2)     # skip the row-number column
+                if cx < x:
+                    return
                 for c in cols:
                     if cx < x + widths[c] + 1:
                         sort_by(c)
@@ -4178,7 +4209,8 @@ class App:
                    lambda e: (on_scroll("scroll",
                                         -1 if e.delta > 0 else 1,
                                         "units"), "break")[1])
-        table.bind("<Configure>", lambda e: render())
+        table.bind("<Configure>",
+                   lambda e: (view.update(adj=0), render()))
         search_var.trace_add("write", lambda *_a: repopulate())
         repopulate()
 
