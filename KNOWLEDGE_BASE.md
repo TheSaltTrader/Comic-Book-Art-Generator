@@ -402,14 +402,35 @@ preview canvas (`canvas.grid_remove()` hides, `grid()` restores — grid
 options survive removal) and `_close_db_browser()` destroys the frame
 and calls `_show_current()`. Style `DB.Treeview` = green (#33ff66) on
 black, Consolas, with a Heading variant. The photo pane has ◀ n/m ▶
-arrows fed by `_actor_photo_blobs(imdb_id)`: reads a multi-photo
-`photo(imdb_id, image)` table when present (future Actor DB Builder),
-falls back to the single `actor.headshot`. `_actor_ref_paths_all()`
-writes every blob to a temp file so multi-photo people feed the swap
-with several pictures automatically. Open guards: `_stop_gif()` first
-(a playing GIF would keep drawing to the hidden canvas), and
-`_close_db_browser(restore=False)` before building so two browsers can
-never stack.
+arrows fed by `_actor_photo_blobs(imdb_id)` (photo sources below).
+`_actor_ref_paths_all()` writes every blob to a temp file so multi-photo
+people feed the swap with several pictures automatically. Open guards:
+`_stop_gif()` first (a playing GIF would keep drawing to the hidden
+canvas), and `_close_db_browser(restore=False)` before building so two
+browsers can never stack.
+
+**Every DB-builder format reads (v1.28.0)** — `meta(format)` decides the
+kind in `_load_actordb`: `cbac-actordb-*` → person (`actor` table),
+`cbac-chardb-*` → character (`character` table, `comicvine_id` PK).
+Character rows are NORMALISED into the person-dict shape in
+`_actordb_rows` (`imdb_id`=str(comicvine_id), `first_name`=name,
+extra keys real_name/character_type/first_year/appearances/publisher/
+deck ride along) so selection, ui-state restore (`actor_imdb`) and the
+swap feed are format-blind. The browser builds its columns from a
+per-kind spec (person: first/last/age/sex/born/died; character:
+name/real/type/year/apps/pub, default sort = appearances DESC), and the
+detail pane surfaces singer-build music columns (genres, voice_type,
+years_active, description — detected via `PRAGMA table_info`, so any
+subset works). Photos: `_actor_photo_blobs` returns the PRIMARY
+headshot/portrait first, then `actor_photo(imdb_id, seq, photo)` /
+`character_photo(comicvine_id, seq, photo)` in seq order — the shapes
+the enrichment tools actually write — with the older
+`photo(imdb_id, image)` shape as a fallback (v1.27 supported only that
+one, which no real producer emits). All reference-DB connects carry
+`timeout=10`: enrichment writers (journal mode delete) briefly lock the
+file at commit, and Windows can transiently refuse the OPEN itself —
+the timeout rides out the former; the latter surfaces an error dialog
+and a re-open works.
 
 **Detail-preserving + multi-face swap (v1.26.0)** — the swap runs at
 FULL denoise (identity needs the freedom: partial denoise was measured

@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.27.0"
+APP_VERSION = "1.28.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2507,7 +2507,8 @@ class App:
         self._batch_active = False
         self.ragmap = None         # loaded RAG map (dict) or None
         self.ragmap_path = None
-        self.actordb_path = None   # actor DB (SQLite from Actor DB Builder)
+        self.actordb_path = None   # reference DB (Actor DB / Database Builder)
+        self.actordb_kind = "person"   # "person" (actordb) | "character" (chardb)
         self.actor_sel = None      # selected actor (dict) or None
         self._actor_thumb = None   # Tk image ref for the small headshot
         self._ollama_models = []   # models found in a local Ollama, if any
@@ -3648,13 +3649,24 @@ class App:
         self._schedule_persist()
 
     # ------------------------------------------------ reference database
-    # A portable SQLite file the USER builds with the Actor DB Builder
-    # tool (nothing ships with the app): actor(imdb_id, first_name,
-    # last_name, birth_date, death_date, sex, headshot BLOB…) +
-    # meta(format='cbac-actordb-1'). The chosen person's photo is extra
-    # context for the model: while editing it joins the editor's
-    # reference images (Kontext/Qwen see it); on plain generations it
-    # face-guides via IP-Adapter (SDXL only). Not RAG — no retrieval.
+    # Portable SQLite files the USER builds with the Actor DB Builder /
+    # Database Builder tools (nothing ships with the app). Two families,
+    # told apart by meta(format):
+    #   cbac-actordb-*  person DBs — actor(imdb_id, first_name, last_name,
+    #       birth_date, death_date, sex, headshot BLOB…); singer builds
+    #       append music columns (genres, voice_type, years_active,
+    #       description…) which the browser surfaces when present; extra
+    #       pictures live in actor_photo(imdb_id, seq, photo) (or the
+    #       older photo(imdb_id, image) shape).
+    #   cbac-chardb-*   comic-character DBs — character(comicvine_id,
+    #       name, real_name, character_type, first_year, appearances,
+    #       deck, portrait BLOB…) + character_photo(comicvine_id, seq,
+    #       photo). Rows are normalised into the person-dict shape so
+    #       selection, persistence and the swap feed are format-blind.
+    # The chosen entry's picture is extra context for the model: while
+    # editing it joins the editor's reference images (Kontext/Qwen see
+    # it); on plain generations it face-guides via IP-Adapter (SDXL
+    # only). Not RAG — no retrieval.
 
     @staticmethod
     def _actor_age(birth, death=None):
@@ -3676,13 +3688,19 @@ class App:
             return None
 
     def _load_actordb(self, path, quiet=False):
-        """Open and validate an actor DB; returns the row count or None."""
+        """Open and validate a reference DB (person or character format);
+        returns the row count or None. Sets self.actordb_kind."""
         try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
             try:
                 fmt = conn.execute(
                     "SELECT value FROM meta WHERE key='format'").fetchone()
-                n = conn.execute("SELECT COUNT(*) FROM actor").fetchone()[0]
+                fmt_s = str(fmt[0]) if fmt else ""
+                kind = ("character" if fmt_s.startswith("cbac-chardb")
+                        else "person")
+                table = "character" if kind == "character" else "actor"
+                n = conn.execute(
+                    f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             finally:
                 conn.close()
         except Exception as e:
@@ -3690,7 +3708,7 @@ class App:
                 messagebox.showerror(
                     "Reference DB", f"Could not read this database: {e}")
             return None
-        if not fmt or not str(fmt[0]).startswith("cbac-actordb"):
+        if not fmt_s.startswith(("cbac-actordb", "cbac-chardb")):
             if not quiet and not messagebox.askyesno(
                     "Reference DB",
                     "This file wasn't made by Actor DB Builder — it may "
@@ -3698,7 +3716,9 @@ class App:
                     "anyway?"):
                 return None
         self.actordb_path = str(path)
-        self.actordb_var.set(f"{Path(path).name} — {n} people")
+        self.actordb_kind = kind
+        word = "characters" if kind == "character" else "people"
+        self.actordb_var.set(f"{Path(path).name} — {n} {word}")
         return n
 
     def _pick_actordb(self):
@@ -3724,13 +3744,16 @@ class App:
                     "extra — the editor sees the photo directly.)"):
                 threading.Thread(target=self._install_style_support,
                                  daemon=True).start()
-        self.status_var.set(f"Reference database loaded ({n} people) — "
+        word = ("characters" if getattr(self, "actordb_kind", "person")
+                == "character" else "people")
+        self.status_var.set(f"Reference database loaded ({n} {word}) — "
                             "pick one with 👤 Person… (ℹ explains how the "
                             "photo is used).")
         self._schedule_persist()
 
     def _clear_actordb(self):
         self.actordb_path = None
+        self.actordb_kind = "person"
         self.actor_sel = None
         self.actordb_var.set("none")
         self.actor_var.set("no person selected")
@@ -3800,46 +3823,85 @@ class App:
         self._refresh_editor_state()
         self._schedule_persist()
 
+    # optional singer-build columns surfaced in the browser when present
+    _PERSON_EXTRA_COLS = ("genres", "instruments", "voice_type",
+                          "years_active", "description", "sitelinks")
+
     def _actordb_rows(self):
-        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
+            if getattr(self, "actordb_kind", "person") == "character":
+                return [{"imdb_id": str(r["comicvine_id"]),
+                         "first_name": r["name"], "last_name": "",
+                         "sex": r["gender"] or "",
+                         "birth_date": None, "death_date": None,
+                         "real_name": r["real_name"],
+                         "character_type": r["character_type"],
+                         "first_year": r["first_year"],
+                         "appearances": r["appearances"],
+                         "publisher": r["publisher"], "deck": r["deck"]}
+                        for r in conn.execute(
+                            "SELECT comicvine_id, name, real_name, gender, "
+                            "character_type, first_year, appearances, "
+                            "publisher, deck FROM character")]
+            have = {r[1] for r in conn.execute("PRAGMA table_info(actor)")}
+            extras = [c for c in self._PERSON_EXTRA_COLS if c in have]
+            cols = ("imdb_id, first_name, last_name, birth_date, "
+                    "death_date, sex" + "".join(f", {c}" for c in extras))
             return [dict(r) for r in conn.execute(
-                "SELECT imdb_id, first_name, last_name, birth_date, "
-                "death_date, sex FROM actor")]
+                f"SELECT {cols} FROM actor")]
         finally:
             conn.close()
 
     def _actor_headshot(self, imdb_id):
-        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro", uri=True, timeout=10)
         try:
-            r = conn.execute("SELECT headshot FROM actor WHERE imdb_id=?",
-                             (imdb_id,)).fetchone()
+            if getattr(self, "actordb_kind", "person") == "character":
+                r = conn.execute(
+                    "SELECT portrait FROM character WHERE comicvine_id=?",
+                    (imdb_id,)).fetchone()
+            else:
+                r = conn.execute(
+                    "SELECT headshot FROM actor WHERE imdb_id=?",
+                    (imdb_id,)).fetchone()
             return r[0] if r and r[0] else None
         finally:
             conn.close()
 
     def _actor_photo_blobs(self, imdb_id):
-        """ALL photos of one person, as a list of image bytes. Reads a
-        multi-photo `photo` table when the DB has one (future Actor DB
-        Builder versions), else falls back to the single headshot."""
+        """ALL pictures of one entry as a list of image bytes: the primary
+        headshot/portrait first, then every extra photo. Extra photos live
+        in actor_photo(imdb_id, seq, photo) / character_photo(comicvine_id,
+        seq, photo) — the shapes the DB-builder enrichment tools write —
+        with the older photo(imdb_id, image) shape still read as a
+        fallback."""
         blobs = []
+        character = getattr(self, "actordb_kind", "person") == "character"
         try:
             conn = sqlite3.connect(f"file:{self.actordb_path}?mode=ro",
-                                   uri=True)
+                                   uri=True, timeout=10)
             try:
-                try:
-                    blobs = [r[0] for r in conn.execute(
-                        "SELECT image FROM photo WHERE imdb_id=? "
-                        "ORDER BY rowid", (imdb_id,)) if r[0]]
-                except sqlite3.Error:
-                    blobs = []
-                if not blobs:
-                    r = conn.execute(
-                        "SELECT headshot FROM actor WHERE imdb_id=?",
-                        (imdb_id,)).fetchone()
-                    if r and r[0]:
-                        blobs = [r[0]]
+                primary = self._actor_headshot(imdb_id)
+                if primary:
+                    blobs.append(primary)
+                queries = (
+                    [("SELECT photo FROM character_photo WHERE "
+                      "comicvine_id=? ORDER BY seq", (imdb_id,))]
+                    if character else
+                    [("SELECT photo FROM actor_photo WHERE imdb_id=? "
+                      "ORDER BY seq", (imdb_id,)),
+                     ("SELECT image FROM photo WHERE imdb_id=? "
+                      "ORDER BY rowid", (imdb_id,))])
+                for sql, args in queries:
+                    try:
+                        extra = [r[0] for r in conn.execute(sql, args)
+                                 if r[0]]
+                    except sqlite3.Error:
+                        extra = []
+                    if extra:
+                        blobs.extend(extra)
+                        break
             finally:
                 conn.close()
         except Exception:
@@ -3857,7 +3919,7 @@ class App:
             self._schedule_persist()
             return
         age = self._actor_age(row.get("birth_date"), row.get("death_date"))
-        bits = [b for b in (row.get("sex"),
+        bits = [b for b in (row.get("character_type"), row.get("sex"),
                             str(age) if age is not None else None) if b]
         self.actor_var.set(
             f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
@@ -3917,40 +3979,65 @@ class App:
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
 
-        cols = ("first", "last", "age", "sex", "born", "died")
-        heads = {"first": "First name", "last": "Last name", "age": "Age",
-                 "sex": "Sex", "born": "Born", "died": "Died"}
+        character = getattr(self, "actordb_kind", "person") == "character"
+        if character:
+            # (id, heading, width, anchor, getter, numeric-sort)
+            spec = [
+                ("name", "Name", 150, "w",
+                 lambda r: r.get("first_name") or "", False),
+                ("real", "Real name", 140, "w",
+                 lambda r: r.get("real_name") or "", False),
+                ("type", "Type", 70, "center",
+                 lambda r: r.get("character_type") or "", False),
+                ("year", "Year", 55, "center",
+                 lambda r: r.get("first_year") or "", True),
+                ("apps", "Apps", 60, "center",
+                 lambda r: r.get("appearances") or "", True),
+                ("pub", "Publisher", 90, "center",
+                 lambda r: r.get("publisher") or "", False),
+            ]
+            state = {"col": "apps", "desc": True}
+        else:
+            def _age_of(r):
+                a = self._actor_age(r.get("birth_date"), r.get("death_date"))
+                return a if a is not None else ""
+            spec = [
+                ("first", "First name", 110, "w",
+                 lambda r: r.get("first_name") or "", False),
+                ("last", "Last name", 140, "w",
+                 lambda r: r.get("last_name") or "", False),
+                ("age", "Age", 45, "center", _age_of, True),
+                ("sex", "Sex", 60, "center",
+                 lambda r: r.get("sex") or "", False),
+                ("born", "Born", 85, "center",
+                 lambda r: r.get("birth_date") or "", False),
+                ("died", "Died", 85, "center",
+                 lambda r: r.get("death_date") or "", False),
+            ]
+            state = {"col": "last", "desc": False}
+        cols = tuple(s[0] for s in spec)
+        heads = {s[0]: s[1] for s in spec}
+        getters = {s[0]: s[4] for s in spec}
+        numeric = {s[0] for s in spec if s[5]}
         tree = ttk.Treeview(frame, columns=cols, show="headings",
                             selectmode="browse", style="DB.Treeview")
-        widths = {"first": 110, "last": 140, "age": 45, "sex": 60,
-                  "born": 85, "died": 85}
-        for c in cols:
-            tree.column(c, width=widths[c],
-                        anchor="w" if c in ("first", "last") else "center")
+        for cid, _h, width, anchor, _g, _n in spec:
+            tree.column(cid, width=width, anchor=anchor)
         tree.grid(row=0, column=0, sticky=NSEW)
         sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=sb.set)
         sb.grid(row=0, column=1, sticky="ns")
 
-        state = {"col": "last", "desc": False}
-
         def repopulate():
             tree.delete(*tree.get_children(""))
             needle = search_var.get().strip().lower()
             for r_ in rows:
-                full = (f"{r_.get('first_name') or ''} "
-                        f"{r_.get('last_name') or ''}").lower()
-                if needle and needle not in full:
+                hay = (f"{getters[cols[0]](r_)} {getters[cols[1]](r_)}"
+                       ).lower()
+                if needle and needle not in hay:
                     continue
-                age = self._actor_age(r_.get("birth_date"),
-                                      r_.get("death_date"))
                 tree.insert("", END, iid=r_["imdb_id"],
-                            values=(r_.get("first_name") or "",
-                                    r_.get("last_name") or "",
-                                    age if age is not None else "",
-                                    r_.get("sex") or "",
-                                    r_.get("birth_date") or "",
-                                    r_.get("death_date") or ""))
+                            values=tuple(getters[c](r_) for c in cols))
             apply_sort()
 
         def apply_sort():
@@ -3959,8 +4046,11 @@ class App:
 
             def val(iid):
                 v = tree.item(iid, "values")[idx]
-                if col == "age":
-                    return int(v) if v != "" else 0
+                if col in numeric:
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return 0
                 return str(v).lower()
             kids.sort(key=val, reverse=state["desc"])
             kids.sort(key=lambda i: tree.item(i, "values")[idx] == "")
@@ -4032,18 +4122,42 @@ class App:
         detail = ttk.Label(side, text="", justify="left", wraplength=200)
         detail.pack(anchor="w")
 
+        def detail_text(r_):
+            lines = [f"{r_.get('first_name') or ''} "
+                     f"{r_.get('last_name') or ''}".strip()]
+            if character:
+                if r_.get("real_name"):
+                    lines.append(r_["real_name"])
+                facts = [str(b) for b in (r_.get("character_type"),
+                                          r_.get("publisher"),
+                                          r_.get("first_year")) if b]
+                if facts:
+                    lines.append(", ".join(facts))
+                if r_.get("appearances"):
+                    lines.append(f"{r_['appearances']} appearances")
+                if r_.get("deck"):
+                    lines.append(str(r_["deck"])[:180])
+            else:
+                age = self._actor_age(r_.get("birth_date"),
+                                      r_.get("death_date"))
+                lines.append((r_.get("sex") or "unknown")
+                             + (f", {age}" if age is not None else ""))
+                # singer builds carry music columns — show what exists
+                if r_.get("genres"):
+                    lines.append(str(r_["genres"])[:90])
+                facts = [str(b) for b in (r_.get("voice_type"),
+                                          r_.get("years_active")) if b]
+                if facts:
+                    lines.append(", ".join(facts))
+                if r_.get("description"):
+                    lines.append(str(r_["description"])[:160])
+            return "\n".join(lines)
+
         def on_sel(_e=None):
             sel = tree.selection()
             if not sel:
                 return
-            r_ = by_id[sel[0]]
-            age = self._actor_age(r_.get("birth_date"),
-                                  r_.get("death_date"))
-            detail.configure(
-                text=f"{r_.get('first_name', '')} "
-                     f"{r_.get('last_name', '')}\n"
-                     f"{r_.get('sex') or 'unknown'}"
-                     + (f", {age}" if age is not None else ""))
+            detail.configure(text=detail_text(by_id[sel[0]]))
             pv["blobs"] = self._actor_photo_blobs(sel[0])
             pv["i"] = 0
             show_photo()

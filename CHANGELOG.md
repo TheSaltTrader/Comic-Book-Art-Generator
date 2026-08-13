@@ -1,5 +1,26 @@
 # Changelog — Comic Book Art Creator
 
+## v1.28.0 — 2026-08-13
+- **The app now reads every database the DB-builder tools produce.**
+  📇 Reference DB… accepts the comic-character databases
+  (`dc_characters.sqlite` / `marvel_characters.sqlite`) alongside the
+  person ones: the browser switches to character columns (Name, Real
+  name, Type, Year, Appearances, Publisher — sorted famous-first), the
+  detail pane shows the character's blurb, and the portrait feeds
+  editing, IP-Adapter guidance and the face swap exactly like a person's
+  headshot.
+- **Multi-photo enrichment actually shows up.** The photo arrows now read
+  the `actor_photo` / `character_photo` tables the enrichment tools
+  write (the older `photo` table still works), with the primary
+  headshot/portrait always first — so enriched databases browse and
+  swap with every picture they hold.
+- **Singer databases show their music.** A person database built with
+  the singers tool displays genres, voice type, active years and the
+  bio right in the browser's detail pane.
+- **Reading while enriching.** Database reads now wait out brief write
+  locks, so a database mid-enrichment can still be browsed; if an open
+  is refused outright, close and reopen it a moment later.
+
 ## v1.27.0 — 2026-08-13
 - **The Reference DB browser lives in the art panel now.** 👤 Person… no
   longer opens a popup: the browser appears where the picture preview is,
