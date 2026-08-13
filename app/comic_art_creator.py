@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.29.0"
+APP_VERSION = "1.30.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -4022,22 +4022,41 @@ class App:
         anchors = {s[0]: s[3] for s in spec}
         # column widths in monospace characters (spec widths are px)
         widths = {s[0]: max(5, s[2] // 8) for s in spec}
-        ROW_CAP = 1500     # rows rendered at once — search narrows the rest
 
         # a Text widget draws the table: ttk's Treeview cannot render cell
-        # gridlines, a monospace grid of box-drawing characters can — and
-        # it stays fast at tens of thousands of rows
+        # gridlines, a monospace grid of box-drawing characters can. The
+        # widget is VIRTUALIZED — only the visible window of rows is ever
+        # rendered, while the scrollbar spans the whole filtered list, so
+        # a 47k-row database scrolls end to end with no cap.
         table = Text(frame, bg="#000000", fg="#ffffff", bd=0,
                      insertwidth=0, highlightthickness=0, wrap="none",
                      font=("Consolas", 10), cursor="arrow",
                      exportselection=False, takefocus=0)
         table.grid(row=0, column=0, sticky=NSEW)
-        sb = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
-        table.configure(yscrollcommand=sb.set)
-        sb.grid(row=0, column=1, sticky="ns")
         table.tag_configure("head", font=("Consolas", 10, "bold"))
         table.tag_configure("selrow", background="#0a4d1f")
-        view = {"rows": [], "shown": 0, "sel": None}
+        view = {"rows": [], "off": 0, "shown": 0, "sel": None}
+        import tkinter.font as _tkfont
+        _line_px = max(1, _tkfont.Font(
+            root=self.root, font=("Consolas", 10)).metrics("linespace"))
+
+        def rows_per_view():
+            # each data row is two text lines (row + rule); 3 header lines
+            return max(5, (table.winfo_height() // _line_px - 3) // 2 + 1)
+
+        def on_scroll(*args):
+            n = len(view["rows"])
+            rpv = rows_per_view()
+            if args and args[0] == "moveto":
+                view["off"] = int(float(args[1]) * max(0, n - rpv))
+            elif args and args[0] == "scroll":
+                step = int(args[1]) * (rpv if args[2] == "pages" else 3)
+                view["off"] += step
+            view["off"] = max(0, min(view["off"], max(0, n - rpv)))
+            render()
+
+        sb = ttk.Scrollbar(frame, orient="vertical", command=on_scroll)
+        sb.grid(row=0, column=1, sticky="ns")
 
         def fmt(c, v):
             w = widths[c]
@@ -4050,6 +4069,9 @@ class App:
             return l + m.join(fill * (widths[c] + 2) for c in cols) + r
 
         def render():
+            n = len(view["rows"])
+            rpv = rows_per_view()
+            view["off"] = max(0, min(view["off"], max(0, n - rpv)))
             table.configure(state="normal")
             table.delete("1.0", END)
             mark = " ▼" if state["desc"] else " ▲"
@@ -4058,31 +4080,35 @@ class App:
                 for c in cols) + " │"
             lines = [rule("┌", "┬", "┐", "─"), head,
                      rule("╞", "╪", "╡", "═")]
-            shown = view["rows"][:ROW_CAP]
+            shown = view["rows"][view["off"]:view["off"] + rpv]
             view["shown"] = len(shown)
             between = rule("├", "┼", "┤", "─")
             for r_ in shown:
                 lines.append("│ " + " │ ".join(
                     fmt(c, getters[c](r_)) for c in cols) + " │")
                 lines.append(between)
-            if shown:
-                lines[-1] = rule("└", "┴", "┘", "─")
-            else:
-                lines.append(rule("└", "┴", "┘", "─"))
-            hidden = len(view["rows"]) - len(shown)
-            if hidden:
-                lines.append(f"  … {hidden} more — type in 🔍 to narrow "
-                             "the list")
+            end_visible = view["off"] + len(shown) >= n
+            closer = rule("└", "┴", "┘", "─")
+            if shown and end_visible:
+                lines[-1] = closer
+            elif not shown:
+                lines.append(closer)
             table.insert("1.0", "\n".join(lines))
             table.tag_add("head", "2.0", "2.end")
             paint_sel()
             table.configure(state="disabled")
+            table.yview_moveto(0)
+            if n:
+                sb.set(view["off"] / n, (view["off"] + len(shown)) / n)
+            else:
+                sb.set(0, 1)
 
         def paint_sel():
             table.tag_remove("selrow", "1.0", END)
             if view["sel"] is None:
                 return
-            for i, r_ in enumerate(view["rows"][:view["shown"]]):
+            for i, r_ in enumerate(
+                    view["rows"][view["off"]:view["off"] + view["shown"]]):
                 if r_["imdb_id"] == view["sel"]:
                     ln = 4 + 2 * i
                     table.tag_add("selrow", f"{ln}.0", f"{ln}.end")
@@ -4110,6 +4136,7 @@ class App:
             vr.sort(key=val, reverse=state["desc"])
             vr.sort(key=lambda r_: str(g(r_)) == "")
             view["rows"] = vr
+            view["off"] = 0
             render()
 
         def sort_by(col):
@@ -4143,9 +4170,15 @@ class App:
                 return
             idx = ln - 4
             if idx >= 0 and idx % 2 == 0 and idx // 2 < view["shown"]:
-                select_iid(view["rows"][idx // 2]["imdb_id"])
+                select_iid(
+                    view["rows"][view["off"] + idx // 2]["imdb_id"])
 
         table.bind("<Button-1>", on_click)
+        table.bind("<MouseWheel>",
+                   lambda e: (on_scroll("scroll",
+                                        -1 if e.delta > 0 else 1,
+                                        "units"), "break")[1])
+        table.bind("<Configure>", lambda e: render())
         search_var.trace_add("write", lambda *_a: repopulate())
         repopulate()
 
@@ -4238,7 +4271,8 @@ class App:
             "select": select_iid, "sort": sort_by,
             "rows": lambda: view["rows"],
             "selected": lambda: view["sel"], "table": table,
-            "choose": choose}
+            "choose": choose, "scroll": on_scroll,
+            "offset": lambda: view["off"]}
 
         btns = ttk.Frame(dlg, padding=(8, 0, 8, 8))
         btns.pack(fill="x")

@@ -403,12 +403,17 @@ header line, `selrow` tag for the highlight). The v1.28 `spec` list
 (id/heading/px-width/anchor/getter/numeric) still drives everything —
 px widths become character widths (`px // 8`, Consolas 10). Line math:
 line 1 top border, 2 header (click → column from char offset), 3 double
-rule, data rows at `4 + 2*i` with a rule between each. `ROW_CAP` 1500
-rows rendered per view (a footer reports the hidden count) so 47k-row
-character DBs stay instant; filtering/sorting always run on the full
-list. Selection/sort/choose are exposed on `self._dbview_api` so tests
-never have to spelunk widgets. The old `DB.Treeview` styles remain
-defined but unused.
+rule, data rows at `4 + 2*i` with a rule between each. **v1.30.0 — the
+table is fully virtualized**: only the visible window renders
+(`rows_per_view()` from `winfo_height` / font linespace; each data row
+is two text lines) while the detached scrollbar spans the whole filtered
+list (`command=on_scroll` handling moveto/units/pages; `sb.set` fed from
+offset/len after every render; wheel bound with "break" so the Text
+never scrolls internally; `<Configure>` re-renders; click math adds
+`view["off"]`). 47k rows scroll end-to-end with no cap — a render is
+only ever ~40 rows, so it is instant. Selection/sort/choose/scroll/
+offset are exposed on `self._dbview_api` so tests never have to spelunk
+widgets. The old `DB.Treeview` styles remain defined but unused.
 
 **In-panel Reference DB browser (v1.27.0)** — `_pick_actor` no longer
 builds a Toplevel: it grids `self.dbview` into the SAME cell as the

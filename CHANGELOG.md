@@ -1,5 +1,12 @@
 # Changelog — Comic Book Art Creator
 
+## v1.30.0 — 2026-08-13
+- **The database browser scrolls through the entire list now.** The
+  1,500-row display limit is gone: the scrollbar spans the whole
+  database — all 47,000 characters if that's what's loaded — and the
+  grid renders the rows as you scroll (scrollbar drag, mouse wheel, or
+  page jumps). Search and sorting still consider every row.
+
 ## v1.29.0 — 2026-08-13
 - **The database browser has a real grid now.** Every cell is boxed in
   clean white lines, and the text is white on black (replacing the green
