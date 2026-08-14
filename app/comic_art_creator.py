@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.32.0"
+APP_VERSION = "1.33.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -2510,6 +2510,8 @@ class App:
         self.actordb_path = None   # reference DB (Actor DB / Database Builder)
         self.actordb_kind = "person"   # "person" (actordb) | "character" (chardb)
         self.actor_sel = None      # selected actor (dict) or None
+        self.actor_photo_i = 0     # which of their photos the arrows chose
+        self._actor_base_label = ""
         self._actor_thumb = None   # Tk image ref for the small headshot
         self._ollama_models = []   # models found in a local Ollama, if any
         self._want_ollama_model = ""   # the one restored from settings
@@ -3083,8 +3085,9 @@ class App:
                               command=self._actor_to_editor)
         toed_btn.grid(row=0, column=3)
         self._tip(toed_btn,
-                  "Load this person's photo as an editor reference for a "
-                  "person-only edit (enters edit mode).")
+                  "Load ALL of this person's photos as editor references "
+                  "for a person-only edit (enters edit mode). Fills up to "
+                  "the editor's image limit — 4 for Kontext, 3 for Qwen.")
         srow = ttk.Frame(left); srow.grid(row=r, sticky=NSEW, pady=(2, 0))
         r += 1
         self.swap_rag_var = BooleanVar(value=False)
@@ -3782,7 +3785,9 @@ class App:
             "  • Style preset, LoRAs and RAG map — NOT applied\n"
             "    (the Kontext/Qwen editors don't use them)\n"
             "  • Reference DB person — the photo is handed to the editor\n"
-            "    as context, so it can draw that person into the result\n\n"
+            "    as context, so it can draw that person into the result\n"
+            "    (➡ To editor loads ALL their photos, up to the editor's\n"
+            "    limit: 4 images for Kontext, 3 for Qwen)\n\n"
             "🔀 USE RAG & LoRA FOR IMAGE SWAP (ticked):\n"
             "  • Generate runs TWO steps: your prompt + preset + LoRAs +\n"
             "    RAG map draw the styled picture as usual, then the face\n"
@@ -3801,23 +3806,38 @@ class App:
             "write the instruction.")
 
     def _actor_to_editor(self):
-        """Load the chosen person's photo into the editor's references —
-        exactly as if it had been loaded with 🖼 Load…"""
+        """Load the chosen person's photos into the editor's references —
+        exactly as if they had been loaded with 🖼 Load…. EVERY picture the
+        database holds for them is added, up to the editor's image limit
+        (Kontext takes 4, Qwen 3), so the model sees the person from more
+        than one angle."""
         if not self.actor_sel:
             messagebox.showinfo("Reference DB",
                                 "Pick a person first (👤 Person…).")
             return
-        ap = self._actor_ref_path()
-        if not ap:
+        paths = self._actor_ref_paths_all()
+        if not paths:
             messagebox.showinfo("Reference DB",
                                 "This person has no photo in the database.")
             return
-        if ap not in self.ref_paths:
-            self.ref_paths.append(ap)
+        cap = 4 if self._editor_engine() == "kontext" else 3
+        added, left_out = 0, 0
+        for p in paths:
+            if p in self.ref_paths:
+                continue
+            if len(self.ref_paths) >= cap:
+                left_out += 1
+                continue
+            self.ref_paths.append(p)
+            added += 1
         first = Path(self.ref_paths[0]).name
         self.ref_var.set(first if len(self.ref_paths) == 1 else
                          f"{len(self.ref_paths)} images ({first}, …)")
-        self.status_var.set("Photo added to the editor — the prompt is now "
+        note = (f"{added} photos added" if added != 1 else "Photo added")
+        if left_out:
+            note += (f" ({left_out} left out — this editor takes at most "
+                     f"{cap} images)")
+        self.status_var.set(note + " to the editor — the prompt is now "
                             "an edit instruction (presets/LoRAs/RAG are "
                             "off while editing).")
         self._refresh_editor_state()
@@ -3908,10 +3928,14 @@ class App:
             pass
         return blobs
 
-    def _set_actor(self, row):
-        """row = dict from _actordb_rows, or None to clear the choice."""
+    def _set_actor(self, row, photo_i=0):
+        """row = dict from _actordb_rows, or None to clear the choice.
+        photo_i = which of the person's pictures the browser was showing —
+        that one leads everywhere it is used (see _actor_ref_paths_all)."""
         self.actor_sel = row
+        self.actor_photo_i = max(0, int(photo_i or 0)) if row else 0
         if not row:
+            self._actor_base_label = ""
             self.actor_var.set("no person selected")
             self.actor_thumb_lab.configure(image="")
             self._actor_thumb = None
@@ -3921,12 +3945,38 @@ class App:
         age = self._actor_age(row.get("birth_date"), row.get("death_date"))
         bits = [b for b in (row.get("character_type"), row.get("sex"),
                             str(age) if age is not None else None) if b]
-        self.actor_var.set(
+        self._actor_base_label = (
             f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
             + (f"  ({', '.join(bits)})" if bits else ""))
+        self._refresh_actor_view()
+        self._refresh_editor_state()
+        self._schedule_persist()
+
+    def _set_actor_photo(self, i):
+        """The browser's ◀ ▶ arrows choose the picture: remember it and
+        show it, so the chosen photo is the one handed to the editor,
+        the swap and the IP-Adapter guidance."""
+        if not self.actor_sel:
+            return
+        self.actor_photo_i = max(0, int(i))
+        self._refresh_actor_view()
+        self._schedule_persist()
+
+    def _refresh_actor_view(self):
+        """Repaint the person label + 48px thumb for the chosen photo."""
         self._actor_thumb = None
         self.actor_thumb_lab.configure(image="")
-        shot = self._actor_headshot(row["imdb_id"])
+        if not self.actor_sel:
+            return
+        blobs = self._actor_photo_blobs(self.actor_sel["imdb_id"])
+        note = ""
+        shot = None
+        if blobs:
+            i = getattr(self, "actor_photo_i", 0) % len(blobs)
+            shot = blobs[i]
+            if len(blobs) > 1:
+                note = f"  · photo {i + 1}/{len(blobs)}"
+        self.actor_var.set(getattr(self, "_actor_base_label", "") + note)
         if shot:
             try:
                 img = Image.open(BytesIO(shot))
@@ -3935,8 +3985,6 @@ class App:
                 self.actor_thumb_lab.configure(image=self._actor_thumb)
             except Exception:
                 pass
-        self._refresh_editor_state()
-        self._schedule_persist()
 
     def _pick_actor(self):
         """The Reference DB browser — shown IN the art panel (the preview
@@ -4227,7 +4275,12 @@ class App:
             r_ = by_id[iid]
             detail.configure(text=detail_text(r_))
             pv["blobs"] = self._actor_photo_blobs(iid)
-            pv["i"] = 0
+            # reopen on the picture already in use for this person
+            pv["i"] = (self.actor_photo_i
+                       if (self.actor_sel
+                           and self.actor_sel.get("imdb_id") == iid
+                           and self.actor_photo_i < len(pv["blobs"]))
+                       else 0)
             show_photo()
 
         def on_click(ev):
@@ -4348,6 +4401,11 @@ class App:
             if len(pv["blobs"]) > 1:
                 pv["i"] = (pv["i"] + step) % len(pv["blobs"])
                 show_photo()
+                # the arrows CHOOSE the picture: if this person is already
+                # the one in use, the choice takes effect immediately
+                if self.actor_sel \
+                        and view["sel"] == self.actor_sel.get("imdb_id"):
+                    self._set_actor_photo(pv["i"])
 
         prev_btn = ttk.Button(arow, text="◀", width=3,
                               command=lambda: flip(-1))
@@ -4395,7 +4453,8 @@ class App:
 
         def choose(_e=None):
             if view["sel"] is not None:
-                self._set_actor(by_id[view["sel"]])
+                # commit the person WITH the picture on screen
+                self._set_actor(by_id[view["sel"]], photo_i=pv["i"])
                 self._close_db_browser()
         table.bind("<Double-1>", choose)
         self._dbview_state = pv          # for tests / future hooks
@@ -4440,17 +4499,23 @@ class App:
 
     def _actor_ref_paths_all(self):
         """ALL of the selected actor's photos as real files (multi-photo
-        DBs give several; classic DBs give one)."""
+        DBs give several; classic DBs give one). The picture chosen with
+        the browser's ◀ ▶ arrows comes FIRST, so every caller that takes
+        one photo takes that one, and the rest follow in order."""
         if not (self.actor_sel and self.actordb_path
                 and Path(self.actordb_path).exists()):
             return []
         try:
+            blobs = self._actor_photo_blobs(self.actor_sel["imdb_id"])
+            if not blobs:
+                return []
+            sel = getattr(self, "actor_photo_i", 0) % len(blobs)
+            order = list(range(sel, len(blobs))) + list(range(0, sel))
             out = []
-            for i, blob in enumerate(
-                    self._actor_photo_blobs(self.actor_sel["imdb_id"])):
+            for i in order:
                 p = Path(tempfile.gettempdir()) / \
                     f"cbac_actor_{self.actor_sel['imdb_id']}_{i}.jpg"
-                p.write_bytes(blob)
+                p.write_bytes(blobs[i])
                 out.append(str(p))
             return out
         except Exception:
@@ -4805,6 +4870,7 @@ class App:
             "ragmap_path": self.ragmap_path,
             "actordb_path": self.actordb_path,
             "actor_imdb": (self.actor_sel or {}).get("imdb_id"),
+            "actor_photo": getattr(self, "actor_photo_i", 0),
             "ollama_model": self.ollama_var.get(),
             "seed": self.seed_var.get(),
             "random_seed": self.random_seed_var.get(),
@@ -4913,7 +4979,8 @@ class App:
                             row = next((r for r in self._actordb_rows()
                                         if r["imdb_id"] == aid), None)
                             if row:
-                                self._set_actor(row)
+                                self._set_actor(
+                                    row, photo_i=st.get("actor_photo", 0))
                         except Exception:
                             pass
             self.seed_var.set(st.get("seed", "0"))

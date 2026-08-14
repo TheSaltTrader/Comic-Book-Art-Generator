@@ -1,5 +1,20 @@
 # Changelog — Comic Book Art Creator
 
+## v1.33.0 — 2026-08-14
+- **➡ To editor now loads all of a person's photos**, not just the first
+  one — up to the editor's image limit (4 for Flux Kontext, 3 for Qwen),
+  skipping any already loaded. The status line says how many went in and
+  how many didn't fit, so the editor can see the person from several
+  angles in one edit.
+- **The browser's ◀ ▶ arrows now choose the picture.** Whichever photo
+  is on screen when you hit "Use this person" becomes the one that gets
+  used — for face swaps, for editor references and for plain-generation
+  face guidance — and the others follow after it. The person's name
+  shows which photo is in use ("· photo 2/3"), flipping the arrows for
+  the person already selected re-picks straight away, and reopening the
+  browser lands on the picture you chose. Your choice is remembered
+  across restarts.
+
 ## v1.32.0 — 2026-08-13
 - **The photo arrows stay put.** The picture now sits in a fixed-size
   box, so tall, wide or small photos no longer push the ◀ ▶ arrows and

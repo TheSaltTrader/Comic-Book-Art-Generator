@@ -345,6 +345,24 @@ dialog is sortable on every column and searchable. The chosen person's
 photo BLOB is written to a temp JPEG at generation time and routed
 **context-aware**:
 
+**How many photos each path sends (v1.33.0)**: `➡ To editor` loads ALL
+of the person's photos (`_actor_ref_paths_all()`) up to the editor cap —
+4 Kontext / 3 Qwen — skipping duplicates and reporting what was left
+out; the 🔀 swap takes `SWAP_MAX_FACES` (2, bounded by Qwen's 3-image
+encoder with the base occupying one slot); plain-generation IP-Adapter
+guidance and the auto-appended person during an edit still use the
+single primary photo (`_actor_ref_path()`). **The browser's ◀ ▶ arrows
+choose that photo** (v1.33.0): `choose()` commits with `photo_i=pv["i"]`,
+`_set_actor(row, photo_i)` stores `actor_photo_i` (persisted as ui-key
+`actor_photo`), and `_actor_ref_paths_all()` ROTATES the blob list so the
+chosen picture is index 0 — every single-photo caller therefore picks it
+up for free, and multi-photo callers keep the rest in wrap-around order.
+Temp filenames keep the ORIGINAL index (`…_<i>.jpg`) so rotation never
+clobbers a cached file. `flip()` also calls `_set_actor_photo()` live
+when the flipped person is the committed one, `select_iid()` reopens on
+`actor_photo_i`, and `_refresh_actor_view()` repaints the 48px thumb +
+the "· photo n/m" suffix.
+
 - *editing* (`editing == bool(ref_paths)`): appended to `ref_images`
   exactly like a hand-loaded reference, cap-aware (Kontext stitches ≤4,
   Qwen `image1-3` ≤3 — over the cap the photo is left out with a status
