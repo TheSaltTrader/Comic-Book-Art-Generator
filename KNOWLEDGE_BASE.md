@@ -100,6 +100,28 @@ it was started with the wrong paths — kill and restart it once
 (`_engine_heal_tried` guards against a loop). In a healthy install the
 disk and engine lists match exactly and this never fires.
 
+**THE NESTING BUG (v1.34.0 — a user's install had `custom_nodes` 17
+levels deep).** `update_engine` preserved `user/input/custom_nodes` by
+`shutil.move(keep/sub, ENGINE_DIR/sub)` — but the fresh ComfyUI zip
+ships its own `custom_nodes/` and `input/`, and **moving a directory
+onto an existing directory puts the source INSIDE it**. So every engine
+update buried the previous folder one level deeper until the engine saw
+none of the user's nodes; the only symptom was a mid-generation `Node
+'IPAdapterUnifiedLoader' not found`. Fixes: `restore_preserved()` merges
+item-by-item (the fresh engine's own copy wins on a name clash), and
+`flatten_nested_dir(parent, name, dedupe)` repairs existing installs at
+every boot (`_repair_engine_dirs` before the engine starts) — shallowest
+level first because that is the most recently preserved copy, `dedupe`
+only for custom_nodes (a same-named nested dir there is an older copy of
+the same package; for input/user a name clash may be different data, so
+leftovers are kept). **Every filesystem probe must go through `_long()`
+(`\\?\` prefix): a plain `Path.is_dir()` silently returns False past
+MAX_PATH, which made the first version of the walk stop before the
+buried levels — and building the test fixture hit the same wall.**
+`_autoheal_addons()` runs after `engine_ready` and self-installs the
+IP-Adapter node if it is still missing (with a re-check after 3s, since
+nodes register during startup).
+
 **Custom nodes need an engine restart, and the manifest cannot install
 them.** `models_manifest.json` delivers *files* only; anything requiring
 a node in `custom_nodes/` needs an app-side installer (see

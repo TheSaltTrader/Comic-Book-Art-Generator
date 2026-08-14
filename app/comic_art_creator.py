@@ -40,7 +40,7 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.33.0"
+APP_VERSION = "1.34.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -600,6 +600,107 @@ def kill_engine():
         capture_output=True, creationflags=NO_WINDOW, timeout=60)
 
 
+def _long(p):
+    """Windows extended-length form. Plain shutil/os calls fail past
+    MAX_PATH, and a nested engine folder blows through it quickly."""
+    s = os.path.abspath(str(p))
+    if os.name == "nt" and not s.startswith("\\\\?\\"):
+        s = "\\\\?\\" + s
+    return s
+
+
+# stock files ComfyUI ships in custom_nodes — duplicated into every nest
+# level by the old update bug, so they are safe to discard when cleaning
+_STOCK_NODE_FILES = {"example_node.py.example", "websocket_image_save.py",
+                     "__pycache__", ".gitignore"}
+
+
+def restore_preserved(keep, engine_dir, subs):
+    """Put the preserved folders back after an engine swap. MERGES into
+    the folders the fresh engine ships instead of `shutil.move`-ing onto
+    them — moving a directory onto an existing directory puts the source
+    INSIDE it, which is what nested custom_nodes one level deeper on
+    every single update until the engine could no longer see any of the
+    user's nodes."""
+    for sub in subs:
+        s = Path(keep) / sub
+        if not s.exists():
+            continue
+        d = Path(engine_dir) / sub
+        if not d.exists():
+            shutil.move(str(s), str(d))
+            continue
+        for item in list(s.iterdir()):
+            target = d / item.name
+            if target.exists():
+                continue          # the fresh engine's own copy wins
+            shutil.move(_long(item), _long(target))
+        shutil.rmtree(_long(s), ignore_errors=True)
+
+
+def flatten_nested_dir(parent, name, dedupe=False):
+    """Repair `custom_nodes/custom_nodes/…` nesting left by older engine
+    updates: hoist the buried content back to the top level and drop the
+    empty shells. Each update pushed the previous folder one level
+    deeper, so the SHALLOWEST copy is the most recent one and wins.
+
+    dedupe=True also discards nested items whose name already exists at
+    the top — right for custom_nodes, where those are just older copies
+    of the same node package; left off for input/user, where a
+    same-named file may hold different data.
+
+    Returns how many items were rescued."""
+    top = Path(parent) / name
+    if not os.path.isdir(_long(top)):
+        return 0
+    # every probe goes through _long: a plain Path check silently returns
+    # False past MAX_PATH, which would stop the walk before the deepest
+    # (and most buried) levels
+    chain, cur = [], top / name
+    while os.path.isdir(_long(cur)):
+        chain.append(cur)
+        cur = cur / name
+    rescued = 0
+    for nest in chain:                    # shallowest first = newest wins
+        try:
+            entries = os.listdir(_long(nest))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry == name:
+                continue                  # that is the next nest level
+            target = top / entry
+            if os.path.exists(_long(target)):
+                continue
+            try:
+                shutil.move(_long(nest / entry), _long(target))
+                rescued += 1
+            except OSError:
+                pass
+
+    def _disposable(d):
+        """True when only stock files and empty nest levels are left."""
+        try:
+            entries = os.listdir(_long(d))
+        except OSError:
+            return False
+        for entry in entries:
+            if entry == name:
+                if not _disposable(d / entry):
+                    return False
+            elif entry in _STOCK_NODE_FILES:
+                continue
+            elif dedupe and os.path.exists(_long(top / entry)):
+                continue          # an older copy of something rescued
+            else:
+                return False
+        return True
+
+    if chain and _disposable(chain[0]):
+        shutil.rmtree(_long(chain[0]), ignore_errors=True)
+    return rescued
+
+
 def update_engine(new_sha, status_cb):
     """Swap in the latest engine, preserving user data, then refresh its
     python packages."""
@@ -626,10 +727,7 @@ def update_engine(new_sha, status_cb):
                 shutil.move(str(s), str(keep / sub))
         shutil.rmtree(ENGINE_DIR)
         shutil.move(str(new_dir), str(ENGINE_DIR))
-        for sub in ("user", "input", "custom_nodes"):
-            s = keep / sub
-            if s.exists():
-                shutil.move(str(s), str(ENGINE_DIR / sub))
+        restore_preserved(keep, ENGINE_DIR, ("user", "input", "custom_nodes"))
         status_cb("Updating engine packages…")
         subprocess.run([str(engine_python()), "-m", "pip", "install", "-q",
                         "-r", str(ENGINE_DIR / "requirements.txt")],
@@ -5145,7 +5243,47 @@ class App:
         time.sleep(2)
         self._boot_engine()
 
+    def _repair_engine_dirs(self):
+        """Undo the folder nesting older engine updates left behind, so
+        the engine can see the user's custom nodes (and inputs) again.
+        Runs before the engine starts, every launch — it is a no-op once
+        the folders are flat."""
+        for sub in ("custom_nodes", "input", "user"):
+            try:
+                n = flatten_nested_dir(ENGINE_DIR, sub,
+                                       dedupe=(sub == "custom_nodes"))
+            except Exception:
+                n = 0
+            if n:
+                self.ui_queue.put((
+                    "status", f"Repaired the engine's {sub} folder "
+                              f"({n} item(s) restored from an older "
+                              "update) — add-ons work again."))
+
+    def _autoheal_addons(self):
+        """After the engine is up: install the add-ons the app needs but
+        the model manifest cannot deliver — the IP-Adapter custom node
+        that powers RAG maps and Reference-DB face guidance. Without this
+        the failure only surfaced mid-generation as 'Node
+        IPAdapterUnifiedLoader not found'."""
+        if getattr(self, "_autoheal_tried", False):
+            return
+        try:
+            if self._style_support_ok():
+                return
+            time.sleep(3)                 # nodes may still be registering
+            if self._style_support_ok():
+                return
+            self._autoheal_tried = True
+            self.ui_queue.put((
+                "status", "Setting up the IP-Adapter add-on (needed for "
+                          "RAG maps and person photos) — one moment…"))
+            self._install_style_support()
+        except Exception:
+            pass
+
     def _boot_engine(self):
+        self._repair_engine_dirs()
         if engine_alive() and not engine_is_ours():
             # a foreign engine (another instance / leftover dev run) holds
             # the port — using it can send results to the wrong window
@@ -5200,6 +5338,7 @@ class App:
         except Exception:
             pass
         self.ui_queue.put(("engine_ready", None))
+        self._autoheal_addons()
 
     # -------------------------------------------------- ui handlers
     def _on_preset(self, _e=None):

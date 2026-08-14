@@ -1,5 +1,23 @@
 # Changelog — Comic Book Art Creator
 
+## v1.34.0 — 2026-08-14
+- **Fixed: engine updates were burying your add-ons.** Every engine
+  update moved the preserved `custom_nodes`, `input` and `user` folders
+  *inside* the new engine's own folders instead of merging with them, so
+  each update pushed your content one level deeper. After enough updates
+  the engine could no longer see the IP-Adapter add-on at all, and
+  generations that use RAG maps or a person's photo failed with "Node
+  'IPAdapterUnifiedLoader' not found". Restoring now merges properly, so
+  this cannot happen again.
+- **Existing installs repair themselves at startup.** The app now
+  un-nests those folders every time it launches, putting your add-ons
+  (and any input images that got buried) back where the engine looks,
+  keeping the most recent copy. It says so in the status line when it
+  fixes something, and does nothing once the folders are healthy.
+- **Missing add-ons install themselves after the engine starts**, rather
+  than failing mid-generation: if the IP-Adapter node still isn't there,
+  the app fetches it and restarts the engine on its own.
+
 ## v1.33.0 — 2026-08-14
 - **➡ To editor now loads all of a person's photos**, not just the first
   one — up to the editor's image limit (4 for Flux Kontext, 3 for Qwen),
