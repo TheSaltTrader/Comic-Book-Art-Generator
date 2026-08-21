@@ -16,6 +16,7 @@ output/
 training/
 border/
 app/settings.json
+app/update_state.json
 extra_model_paths.yaml
 engine.log
 engine_err.log

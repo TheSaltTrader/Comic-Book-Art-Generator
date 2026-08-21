@@ -1,5 +1,37 @@
 # Changelog — Comic Book Art Creator
 
+## v1.35.0 — 2026-08-20
+- **The app now shows you an update before it takes one.** When a newer
+  release exists, a window opens with the new version number, the
+  download size, the release date and the full "what's new" notes from
+  GitHub — and three choices: **Update now**, **Skip this version**, or
+  **Continue**. Nothing is downloaded until you press Update now, so you
+  can read what changed and decide. Previously it was a bare yes/no box
+  with no notes and no size.
+- **Skip a version and it stays skipped.** The startup check goes quiet
+  for that release and speaks up again only when there is a newer one.
+- **A "Check for updates" button** now sits at the bottom of the left
+  panel next to the version number, so you can look whenever you like —
+  including for a version you skipped earlier. It tells you when you are
+  already up to date instead of appearing to do nothing.
+- **You can watch the download and stop it.** A progress bar shows MB
+  downloaded of MB total, and Cancel stops it and leaves your current
+  version exactly as it was.
+- **Updates can no longer half-install.** The download is checked before
+  anything is replaced: it must be a genuine Windows program reporting a
+  version newer than the one you are running, so a damaged download or a
+  mis-tagged release is refused rather than leaving you with an app that
+  will not start. If the swap fails part way, your previous version is
+  put back.
+- **Updates now refresh the documentation and the model list**, not just
+  the program. Those files used to stay frozen at whatever version first
+  installed the app — which is how installs ended up not being offered
+  models that had been added since. Your own `presets.json` and settings
+  are still left alone.
+- **Old copies of the app are cleaned up.** The previous version is kept
+  aside during the swap (Windows will not overwrite a running program)
+  and deleted at the next launch, instead of piling up forever.
+
 ## v1.34.0 — 2026-08-14
 - **Fixed: engine updates were burying your add-ons.** Every engine
   update moved the preserved `custom_nodes`, `input` and `user` folders

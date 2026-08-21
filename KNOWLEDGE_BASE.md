@@ -144,6 +144,54 @@ ships must either be embedded or explicitly refreshed by the updater —
 exe-only self-updates silently fork it. (`presets.json` is deliberately
 NOT synced — users edit it.)
 
+---
+
+**The self-updater lives in `app\self_update.py` (v1.35.0).** It owns the
+whole path: check → window → download → verify → swap → refresh → relaunch.
+It imports nothing from `comic_art_creator`, so there is no cycle; the app
+calls `self_update.configure(PROJECT, APP_DIR)` once at import and hands it
+callbacks. Two entry points: the startup background check
+(`_check_updates_bg`) and the **Check for updates** button
+(`_check_updates_now`, which passes `include_skipped=True` so a skipped
+release stays reachable). The window is `UpdateWindow`: release notes,
+size, a progress bar, and Update now / Skip this version / Continue —
+nothing downloads until the user presses Update now.
+
+Things it does that are easy to get wrong, and why:
+
+- **`version_tuple()` pads to exactly 4 parts.** A git tag reads as three
+  numbers (`1.34.0`) but an exe's version resource always yields four
+  (`1.34.0.0`), and in Python a shorter tuple sorts BELOW a longer one
+  sharing its prefix — so `(1,34,0,0) > (1,34,0)` and an exe of exactly
+  the running version sailed straight through the "is it actually newer"
+  gate. The test caught this; reading the code did not.
+- **Nothing is swapped until the download is verified.** `exe_version()`
+  reads the version resource through `version.dll` via ctypes (no
+  pywin32 — it is not in the frozen bundle) and the swap is refused
+  unless the file is a real PE reporting a NEWER version. That catches a
+  truncated download and a mis-tagged release before the user is left
+  with an app that will not start.
+- **The swap rolls back.** A running exe cannot be overwritten on
+  Windows, so it is renamed `*_old_<pid>.exe` and the new one copied in;
+  if a later copy fails, everything moved is put back. Those aside copies
+  cannot be deleted while that session runs, so `sweep_old_exes()` clears
+  them at the NEXT launch rather than letting them pile up forever.
+- **`_refresh_data_files()` applies the staleness rule above** — the docs
+  and `app\models_manifest.json` are copied out of the same release zip
+  (JSON is parsed before it can replace a working file). `presets.json`
+  and `settings.json` are never touched.
+- Zip entries are path-checked before extraction, and the download loop
+  honours a cancel event so Cancel actually stops it.
+
+Tests, both of which must pass before a release:
+`app\self_update_test.py` (75 checks — versions, the resource read, skip
+memory, the sweep, the zip guard, the verify gate, roll-back, data
+refresh, every `check()` path, notes rendering, and the window built for
+real on a withdrawn root) and `app\update_ui_test.py` (20 checks — the
+flow as wired into the real App window, engine stubbed out). The release
+zip layout they assume is the real one: exes and docs flat at the root,
+plus `app/models_manifest.json` and `app/presets.json`.
+
 ## 3. Building and releasing
 
 No spec file is checked in. These commands are the source of truth; both

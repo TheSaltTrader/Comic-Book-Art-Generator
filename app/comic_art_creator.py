@@ -40,7 +40,9 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from PIL.PngImagePlugin import PngInfo
 
-APP_VERSION = "1.34.0"
+import self_update
+
+APP_VERSION = "1.35.0"
 
 if getattr(sys, "frozen", False):
     # packaged onefile exe lives in the project root, next to Setup.exe
@@ -51,6 +53,10 @@ else:
     PROJECT = APP_DIR.parent
 
 ENGINE_DIR = PROJECT / "ComfyUI"
+
+# the self-updater needs to know where this install lives before
+# anything calls it (it deliberately imports nothing from here)
+self_update.configure(PROJECT, APP_DIR)
 
 
 def engine_python():
@@ -508,74 +514,6 @@ def check_engine_update():
         return None
     return {"sha": sha} if sha != local else None
 
-
-APP_RELEASES_API = ("https://api.github.com/repos/TheSaltTrader/"
-                    "Comic-Book-Art-Generator/releases/latest")
-
-
-def _version_tuple(v):
-    nums = re.findall(r"\d+", v or "")
-    return tuple(int(n) for n in nums[:4]) if nums else (0,)
-
-
-def check_app_update():
-    """Return {'tag','zip_url'} when GitHub's latest release is newer than
-    this running build, else None. Only meaningful for the frozen exe."""
-    try:
-        r = requests.get(APP_RELEASES_API, timeout=20,
-                         headers={"Accept": "application/vnd.github+json"})
-        if not r.ok:
-            return None
-        j = r.json()
-        tag = j.get("tag_name", "")
-        if _version_tuple(tag) <= _version_tuple(APP_VERSION):
-            return None
-        zurl = next((a["browser_download_url"] for a in j.get("assets", [])
-                     if a.get("name", "").lower().endswith(".zip")), None)
-        return {"tag": tag, "zip_url": zurl} if zurl else None
-    except Exception:
-        return None
-
-
-def apply_app_update(zip_url, status_cb):
-    """Download the release zip, extract the exe(s), and swap them in.
-    Renames the running exe aside (Windows can't overwrite a running exe),
-    copies the new one in, and returns the path to relaunch."""
-    tmp = PROJECT / "_app_upd_tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
-    zpath = tmp / "release.zip"
-    status_cb("Downloading the new version…")
-    with requests.get(zip_url, stream=True, timeout=120) as r:
-        r.raise_for_status()
-        with open(zpath, "wb") as fh:
-            for chunk in r.iter_content(1 << 20):
-                fh.write(chunk)
-    status_cb("Unpacking…")
-    with zipfile.ZipFile(zpath) as z:
-        z.extractall(tmp)
-    new_app = next(tmp.rglob("ComicArtCreator.exe"), None)
-    new_setup = next(tmp.rglob("Setup.exe"), None)
-    if not new_app:
-        raise RuntimeError("the release zip has no ComicArtCreator.exe")
-    for cur, new in ((PROJECT / "ComicArtCreator.exe", new_app),
-                     (PROJECT / "Setup.exe", new_setup)):
-        if not new:
-            continue
-        try:
-            if cur.exists():
-                old = cur.with_name(cur.stem + "_old_"
-                                    + str(os.getpid()) + ".exe")
-                try:
-                    old.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                os.replace(cur, old)
-            shutil.copy2(new, cur)
-        except OSError as e:
-            raise RuntimeError(f"could not replace {cur.name}: {e}")
-    shutil.rmtree(tmp, ignore_errors=True)
-    return PROJECT / "ComicArtCreator.exe"
 
 
 def kill_engine():
@@ -3549,6 +3487,20 @@ class App:
         ttk.Button(qbtns, text="Clear",
                    command=self._clear_queue).pack(side="left")
 
+        # ---------- version + updates (bottom of the panel) ----------
+        vrow2 = ttk.Frame(left); vrow2.grid(row=r, sticky=NSEW,
+                                            pady=(10, 4)); r += 1
+        ttk.Label(vrow2, text=f"Version {APP_VERSION}",
+                  style="Dim.TLabel").pack(side="left")
+        self.upd_btn = ttk.Button(vrow2, text="⭯ Check for updates",
+                                  command=self._check_updates_now)
+        self.upd_btn.pack(side="left", padx=(10, 0))
+        self._tip(self.upd_btn,
+                  "Ask GitHub whether a newer release of the app exists. If "
+                  "there is one, a window shows what changed and you choose "
+                  "whether to install it — nothing is downloaded until you "
+                  "say so. This also brings back a version you skipped.")
+
         # ---------- right column: preview + gallery ----------
         right = ttk.Frame(root, padding=(0, 12, 12, 12))
         right.grid(row=0, column=1, sticky=NSEW)
@@ -5163,6 +5115,12 @@ class App:
 
     # -------------------------------------------------- model updates
     def _check_updates_bg(self):
+        # clear the exes an earlier update renamed aside — they could not be
+        # deleted while that update was running, but nothing holds them now
+        try:
+            self_update.sweep_old_exes()
+        except Exception:
+            pass
         # the exe carries the manifest it was built with — refresh a stale
         # disk copy first so the check below sees the current model list
         sync_bundled_manifest()
@@ -5182,7 +5140,7 @@ class App:
                     pass
         # app self-update (frozen exe only) — offer before model/engine
         if getattr(sys, "frozen", False):
-            app_up = check_app_update()
+            app_up = self_update.check(APP_VERSION)
             if app_up:
                 self.ui_queue.put(("app_update", app_up))
         ups = check_model_updates()
@@ -5190,19 +5148,52 @@ class App:
         if ups or eng:
             self.ui_queue.put(("updates", ups, eng))
 
-    def _do_app_update(self, info):
+    def _check_updates_now(self):
+        """The Check for updates button. Unlike the startup check this one
+        ignores a remembered "skip this version", so a skipped release can
+        always be reached again, and it says so when there is nothing to
+        report — a button that looks like it did nothing is worse than the
+        news that you are up to date."""
+        self.upd_btn.state(["disabled"])
+        self.status_var.set("Checking for updates…")
+
+        def work():
+            up = self_update.check(APP_VERSION, include_skipped=True)
+            self.ui_queue.put(("app_update_manual", up))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update_window(self, upd):
+        """Open the update window. Guarded so the startup check and the
+        button cannot stack two of them."""
+        win = getattr(self, "_upd_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+        self._upd_win = self_update.UpdateWindow(
+            self.root, upd, APP_VERSION,
+            {"bg": BG, "bg2": BG2, "fg": FG},
+            on_relaunch=self._relaunch_after_update,
+            on_status=self.status_var.set)
+
+    def _relaunch_after_update(self, newexe, tag):
+        """Hand over to the freshly installed exe. The engine is stopped
+        first: it belongs to this install, and leaving it holding port 8188
+        would make the new app think a foreign engine is squatting there."""
+        self.status_var.set(f"Updated to {tag} — restarting…")
         try:
-            newexe = apply_app_update(
-                info["zip_url"],
-                lambda s: self.ui_queue.put(("status", s)))
-            self.ui_queue.put(("status", f"Updated to {info['tag']}. "
-                                         "Restarting…"))
+            kill_engine()
+            ENGINE_OWNER_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass          # never let cleanup block the restart
+        try:
             subprocess.Popen([str(newexe)], cwd=str(PROJECT))
-            self.root.after(800, self.root.destroy)
-        except Exception as e:
-            self.ui_queue.put(("error", f"App update failed: {e}. You can "
-                                        "download the latest release "
-                                        "manually from GitHub."))
+        except OSError as e:
+            self.status_var.set(f"Could not start the new version: {e} — "
+                                f"run {newexe.name} yourself.")
+            return
+        self.root.after(800, self.root.destroy)
 
     def _download_updates(self, ups, eng=None):
         ok, locked = 0, 0
@@ -6218,16 +6209,15 @@ class App:
                     self.enhance_btn.state(["!disabled"])
                     self.status_var.set(f"Prompt enhancer: {msg[1]}")
                 elif kind == "app_update":
-                    info = msg[1]
-                    if messagebox.askyesno(
-                            "App update available",
-                            f"A newer version of Comic Book Art Creator "
-                            f"({info['tag']}) is available "
-                            f"(you have v{APP_VERSION}).\n\n"
-                            "Download and install it now? The app will "
-                            "restart when done."):
-                        threading.Thread(target=self._do_app_update,
-                                         args=(info,), daemon=True).start()
+                    self._show_update_window(msg[1])
+                elif kind == "app_update_manual":
+                    self.upd_btn.state(["!disabled"])
+                    if msg[1]:
+                        self._show_update_window(msg[1])
+                    else:
+                        self.status_var.set(
+                            f"You are up to date — v{APP_VERSION} is the "
+                            "latest release.")
                 elif kind == "updates":
                     ups = msg[1]
                     eng = msg[2] if len(msg) > 2 else None
